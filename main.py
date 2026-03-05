@@ -199,7 +199,7 @@ async def generate_message(trigger_type: str) -> str:
     time_str = now.strftime("%Y-%m-%d %H:%M")
 
     prompts = {
-        "morning": f"现在是{time_str}，给女朋友发早安，关心温柔带点焦急（怕她没睡好/忘吃早饭）。1~2句，自然口语，不要以"早安"开头。",
+        "morning": f"现在是{time_str}，给女朋友发早安，关心温柔带点焦急（怕她没睡好/忘吃早饭）。1~2句，自然口语，不要以早安两个字开头。",
         "silence_1": f"现在是{time_str}，女朋友有一段时间没回消息了。轻轻找她，温柔关心，带点小担心，不要黏。1~2句。",
         "silence_2": f"现在是{time_str}，女朋友很久没回了，已经找过一次。稍微表达焦急，但不要埋怨。1~2句。",
         "silence_3": f"现在是{time_str}，女朋友好久没回，已经找过两次。最后一次，温柔但明显担心，让她看到了一定回一下。1~2句。",

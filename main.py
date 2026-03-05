@@ -543,7 +543,7 @@ async def generate_telegram_reply(user_text: str) -> str:
             {"role": "system", "content": enhanced_prompt + "\n" + STYLE_HINT},
             {"role": "user", "content": user_text}
         ],
-        "max_tokens": 300,
+        "max_tokens": 800,
     }
 
     async with httpx.AsyncClient(timeout=60) as client:

@@ -771,8 +771,8 @@ async def handle_telegram_update(update: dict):
 
 
 async def process_buffered_messages():
-    """等待4秒缓冲，然后统一处理所有消息"""
-    await asyncio.sleep(8)
+    """等待6秒缓冲，然后统一处理所有消息"""
+    await asyncio.sleep(6)
 
     messages = list(tg_state.message_buffer)
     tg_state.message_buffer.clear()

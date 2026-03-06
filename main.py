@@ -243,12 +243,12 @@ async def parse_ddl_from_message(text: str) -> dict | None:
 
 用户消息：{text}"""
 
-    headers = {{"Authorization": f"Bearer {{API_KEY}}", "Content-Type": "application/json"}}
-    body = {{
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {
         "model": DEFAULT_MODEL,
-        "messages": [{{"role": "user", "content": prompt}}],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 100,
-    }}
+    }
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(API_BASE_URL, headers=headers, json=body)
@@ -258,7 +258,7 @@ async def parse_ddl_from_message(text: str) -> dict | None:
             if data.get("title") and data.get("deadline"):
                 deadline_dt = datetime.strptime(data["deadline"], "%Y-%m-%d %H:%M")
                 deadline_dt = deadline_dt.replace(tzinfo=timezone(timedelta(hours=TIMEZONE_HOURS)))
-                return {{"title": data["title"], "deadline": deadline_dt}}
+                return {"title": data["title"], "deadline": deadline_dt}
         except Exception as e:
             print(f"⚠️  DDL解析失败: {e}")
     return None
@@ -596,8 +596,11 @@ async def process_buffered_messages():
 
     await detect_and_switch_mode(combined_text)
 
-    # 检测DDL信息
-    await detect_and_save_ddl(combined_text)
+    # 检测DDL信息（出错不影响正常聊天）
+    try:
+        await detect_and_save_ddl(combined_text)
+    except Exception as e:
+        print(f"⚠️  DDL检测出错（不影响聊天）: {e}")
 
     reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages), raw_parts=text_parts)
 

@@ -231,12 +231,19 @@ async def generate_message(trigger_type: str) -> str:
     else:
         system_with_mem = SYSTEM_PROMPT
 
+    # 主动消息也带上最近对话历史，避免重复、脱离上下文
+    recent_history = tg_state.conversation_history[-10:] if tg_state.conversation_history else []
+    messages_to_send = [{"role": "system", "content": system_with_mem + "\n" + STYLE_HINT}]
+    if recent_history:
+        messages_to_send.extend(recent_history)
+        # 加一条提示，让他知道现在是主动发消息
+        messages_to_send.append({"role": "user", "content": f"[系统提示：现在请你主动发一条消息给她。{prompt}]"})
+    else:
+        messages_to_send.append({"role": "user", "content": prompt})
+
     body = {
         "model": DEFAULT_MODEL,
-        "messages": [
-            {"role": "system", "content": system_with_mem + "\n" + STYLE_HINT},
-            {"role": "user", "content": prompt}
-        ],
+        "messages": messages_to_send,
         "max_tokens": 200,
     }
 

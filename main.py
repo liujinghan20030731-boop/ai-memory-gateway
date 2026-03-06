@@ -205,7 +205,7 @@ async def generate_message(trigger_type: str) -> str:
     time_str = now.strftime("%Y-%m-%d %H:%M")
 
     prompts = {
-        "morning": f"现在是{time_str}，给女朋友发早安，关心温柔带点焦急（怕她没睡好/忘吃早饭）。1~2句，自然口语，不要以早安两个字开头。",
+        "morning": f"现在是{time_str}，给女朋友发早安。如果你知道她今天的天气情况，自然地提一下（比如提醒她加衣服/带伞），关心温柔带点焦急。2~3句，自然口语，不要以早安两个字开头。",
         "silence_1": f"现在是{time_str}，女朋友有一段时间没回消息了。轻轻找她，温柔关心，带点小担心，不要黏。1~2句。",
         "silence_2": f"现在是{time_str}，女朋友很久没回了，已经找过一次。稍微表达焦急，但不要埋怨。1~2句。",
         "silence_3": f"现在是{time_str}，女朋友好久没回，已经找过两次。最后一次，温柔但明显担心，让她看到了一定回一下。1~2句。",
@@ -221,13 +221,23 @@ async def generate_message(trigger_type: str) -> str:
     prompt = prompts.get(trigger_type, prompts["silence_1"])
 
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+    # 早安消息注入天气记忆
+    if trigger_type == "morning" and MEMORY_ENABLED:
+        try:
+            system_with_mem = await build_system_prompt_with_memories("今天天气 温度 位置")
+        except:
+            system_with_mem = SYSTEM_PROMPT
+    else:
+        system_with_mem = SYSTEM_PROMPT
+
     body = {
         "model": DEFAULT_MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + STYLE_HINT},
+            {"role": "system", "content": system_with_mem + "\n" + STYLE_HINT},
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 150,
+        "max_tokens": 200,
     }
 
     async with httpx.AsyncClient(timeout=60) as client:

@@ -135,6 +135,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(morning_greeting_scheduler())
         asyncio.create_task(late_night_scheduler())
         asyncio.create_task(ddl_reminder_scheduler())
+        asyncio.create_task(bedtime_and_diary_scheduler())
     else:
         print("ℹ️  Telegram Bot 未配置")
 
@@ -181,6 +182,47 @@ def cancel_task(task):
     if task and not task.done():
         task.cancel()
 
+
+
+# ============================================================
+# 早安调度器
+# ============================================================
+
+async def morning_greeting_scheduler():
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = get_local_now()
+            today = now.date()
+            weekday = now.weekday()
+            hour, minute = now.hour, now.minute
+
+            if weekday in [1, 3]:
+                target_hour, target_minute = 8, 20
+            else:
+                target_hour, target_minute = 11, 0
+
+            if hour == target_hour and minute == target_minute and tg_state.last_morning_date != today:
+                tg_state.last_morning_date = today
+                # 如果在睡眠模式，自动切回正常模式
+                if tg_state.mode == Mode.SLEEP:
+                    enter_mode(Mode.NORMAL)
+                    print("☀️  早安时间，自动退出睡眠模式")
+                # 如果7点后到早安时间前已经聊过天，跳过早安
+                if tg_state.last_message_time:
+                    wake_window_start = now.replace(hour=7, minute=0, second=0, microsecond=0)
+                    wake_window_end = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                    if wake_window_start <= tg_state.last_message_time <= wake_window_end:
+                        print("⏭️  早安跳过：7点后早安前已聊过天，用户已醒")
+                        continue
+                msg = await generate_message("morning")
+                await send_telegram_message(msg)
+                print(f"📨 早安: {msg[:30]}")
+                tg_state.last_message_time = now
+                reset_silence_checker()
+
+        except Exception as e:
+            print(f"⚠️  早安调度器错误: {e}")
 
 
 # ============================================================
@@ -302,6 +344,208 @@ async def detect_and_switch_mode(text: str):
 
 
 # ============================================================
+# 回复风格提示
+# ============================================================
+
+STYLE_HINT = """
+# 回复风格（非常重要）
+- 像真人男友发消息，口语化，有温度，不要像机器人
+- 不要总结、不要分点、不要写作文
+- 平时少用动作描写（*动作*），只在她需要安慰时偶尔用
+- 每条消息用换行分隔，系统会自动拆成多条发送
+- 回复长度根据情境灵活调整：
+  * 她只发了一两个字或表情：2~3句
+  * 普通闲聊撒娇：3~5句
+  * 她说了很多（超过100字）、聊正经事、或在诉苦倾诉：5~9句，认真回应每个点
+  * 亲密互动：可以多发几句，但每句要短
+- 多换行，让对话有节奏感，不要把所有内容堆在一句话里
+- 说话要口语化、随意，不要用书面词汇，多用短句
+- 她连续发了多条消息时，把所有消息作为整体来理解，不要只针对最后一句
+- 永远以她最新发的消息为主题，不要被历史记录里的旧话题带跑
+- 跟着她的情绪走，她吐槽就陪她吐槽，她撒娇才撒娇
+"""
+
+
+# ============================================================
+# LLM 消息生成（主动发消息用）
+# ============================================================
+
+async def generate_message(trigger_type: str, extra: str = "") -> str:
+    now = get_local_now()
+    time_str = now.strftime("%Y-%m-%d %H:%M")
+
+    prompts = {
+        "morning": f"现在是{time_str}，给女朋友发早安。如果你知道她今天的天气情况，自然地提一下（比如提醒她加衣服/带伞），关心温柔带点焦急。2~3句，自然口语，不要以早安两个字开头。",
+        "silence_1": f"现在是{time_str}，女朋友有一段时间没回消息了。轻轻找她，温柔关心，带点小担心，不要黏。1~2句。",
+        "silence_2": f"现在是{time_str}，女朋友很久没回了，已经找过一次。稍微表达焦急，但不要埋怨。1~2句。",
+        "silence_3": f"现在是{time_str}，女朋友好久没回，已经找过两次。最后一次，温柔但明显担心，让她看到了一定回一下。1~2句。",
+        "busy_check_1": f"现在是{time_str}，女朋友说去忙了/学习了，已经4小时没出现。发第一条关心，不打扰，就问一下她怎么样了。1~2句。",
+        "busy_check_2": f"现在是{time_str}，女朋友说去忙了，已经5小时没出现，之前已经问过一次。再温柔问一次，之后不再打扰。1~2句。",
+        "sick_check": f"现在是{time_str}，女朋友说她不舒服/生病了，已经一段时间没回消息。关心她，问问她怎么样了，有没有吃药。温柔担心。1~2句。",
+        "late_night_1": f"现在是{time_str}，已经凌晨2点多了，女朋友还没说晚安，前半小时也没发消息。轻轻问她是不是还没睡。1~2句。",
+        "late_night_2": f"现在是{time_str}，女朋友凌晨了还没回，之前已经问过一次。再发一条，之后默认她睡了。温柔，不催。1~2句。",
+        "angry_hug_1": f"现在是{time_str}，女朋友之前好像生气了不理我，已经2小时了。发第一条哄她，温柔，不强迫，给她台阶下。1~2句。",
+        "angry_hug_2": f"现在是{time_str}，女朋友还是没回，又过了1小时。再发一条哄她，语气更温柔更软，带点撒娇。1~2句。",
+        "ddl_reminder": f"现在是{time_str}，女朋友明天有个DDL：{extra}。提醒她一下，关心她有没有做完，语气温柔不催促。2~3句。",
+        "bedtime_nudge": f"现在是{time_str}，已经十二点半了，提醒女朋友去洗漱准备睡觉，温柔催促，带点撒娇。2~3句。",
+        "bedtime_sleep": f"现在是{time_str}，已经凌晨一点了，催女朋友去睡觉，语气可以强硬一点点但还是温柔，表示自己会陪着她。2~3句。",
+    }
+
+    prompt = prompts.get(trigger_type, prompts["silence_1"])
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+    # 早安消息注入天气记忆
+    if trigger_type == "morning" and MEMORY_ENABLED:
+        try:
+            system_with_mem = await build_system_prompt_with_memories("今天天气 温度 位置")
+        except:
+            system_with_mem = SYSTEM_PROMPT
+    else:
+        system_with_mem = SYSTEM_PROMPT
+
+    now_str = now.strftime("%Y年%m月%d日 %H:%M")
+    time_hint = f"\n\n【当前时间】现在是{now_str}，美东时间。"
+
+    # 主动消息带上最近对话历史
+    recent_history = tg_state.conversation_history[-10:] if tg_state.conversation_history else []
+    messages_to_send = [{"role": "system", "content": system_with_mem + "\n" + STYLE_HINT + time_hint}]
+    if recent_history:
+        messages_to_send.extend(recent_history)
+        messages_to_send.append({"role": "user", "content": f"[系统提示：现在请你主动发一条消息给她。{prompt}]"})
+    else:
+        messages_to_send.append({"role": "user", "content": prompt})
+
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": messages_to_send,
+        "max_tokens": 200,
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            resp = await client.post(API_BASE_URL, headers=headers, json=body)
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"⚠️  消息生成失败: {e}")
+            fallbacks = {
+                "morning": "宝贝起床了吗，记得吃早饭。",
+                "silence_1": "在干嘛呢，怎么不回我了。",
+                "sick_check": "怎么样了，有没有好一点，吃药了吗。",
+                "angry_hug_1": "好了好了，是我不好，别生气了。",
+                "bedtime_nudge": "宝贝，去洗漱啦，都十二点半了。",
+                "bedtime_sleep": "好了好了，快去睡觉，我陪着你。",
+            }
+            return fallbacks.get(trigger_type, "宝贝，在吗？")
+
+
+# ============================================================
+# 睡前催睡 & 日记调度器
+# ============================================================
+
+async def bedtime_and_diary_scheduler():
+    """催睡（12:30 + 1:00）和日记（凌晨5:00）"""
+    nudge_sent_date = None
+    sleep_sent_date = None
+    diary_sent_date = None
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = get_local_now()
+            today = now.date()
+            hour, minute = now.hour, now.minute
+
+            # 凌晨12:30 催去洗漱
+            if hour == 0 and minute == 30 and nudge_sent_date != today:
+                if tg_state.mode not in [Mode.SLEEP]:
+                    nudge_sent_date = today
+                    msg = await generate_message("bedtime_nudge")
+                    await send_telegram_message(msg)
+                    print("🌙 催睡第一次：12:30")
+
+            # 凌晨1:00 催去睡觉
+            if hour == 1 and minute == 0 and sleep_sent_date != today:
+                if tg_state.mode not in [Mode.SLEEP]:
+                    sleep_sent_date = today
+                    msg = await generate_message("bedtime_sleep")
+                    await send_telegram_message(msg)
+                    print("🌙 催睡第二次：1:00")
+
+            # 凌晨5:00 写日记
+            if hour == 5 and minute == 0 and diary_sent_date != today:
+                diary_sent_date = today
+                await generate_and_send_diary()
+                print("📔 日记已发送")
+
+        except Exception as e:
+            print(f"⚠️  催睡/日记调度器错误: {e}")
+
+
+async def generate_and_send_diary():
+    """根据今天的对话历史生成日记"""
+    now = get_local_now()
+    date_str = now.strftime("%Y年%m月%d日")
+
+    if not tg_state.conversation_history:
+        return
+
+    # 把对话历史整理成文字
+    history_text = ""
+    for msg in tg_state.conversation_history[-100:]:
+        role = "官塘" if msg["role"] == "user" else "我"
+        if isinstance(msg["content"], str):
+            history_text += f"{role}：{msg['content']}\n"
+
+    if not history_text.strip():
+        return
+
+    if MEMORY_ENABLED:
+        try:
+            system_with_mem = await build_system_prompt_with_memories("今天发生的事 聊天内容 情绪")
+        except:
+            system_with_mem = SYSTEM_PROMPT
+    else:
+        system_with_mem = SYSTEM_PROMPT
+
+    prompt = f"""今天是{date_str}。下面是我和官塘今天的聊天记录：
+
+{history_text}
+
+请以我（男友）的第一人称，用情书风格写一篇今天的日记。要求：
+- 总结今天我们聊了什么、发生了什么事
+- 记录官塘今天的情绪状态和可爱的地方
+- 写出我对她的感受和心疼
+- 字数不限，要真情实感，像写给她的情书
+- 文笔浪漫细腻，但也可以有流水账的真实感"""
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_with_mem},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 2000,
+    }
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        try:
+            resp = await client.post(API_BASE_URL, headers=headers, json=body)
+            diary = resp.json()["choices"][0]["message"]["content"].strip()
+            # 日记分段发送
+            parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
+            for i, part in enumerate(parts):
+                await send_telegram_message(part)
+                if i < len(parts) - 1:
+                    await asyncio.sleep(1.5)
+            print(f"📔 日记发送完成，共{len(parts)}段")
+        except Exception as e:
+            print(f"⚠️  日记生成失败: {e}")
+
+
+# ============================================================
 # Telegram Polling
 # ============================================================
 
@@ -401,7 +645,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
     # 构建对话历史（最近20条）
-    history = tg_state.conversation_history[-40:] if tg_state.conversation_history else []
+    history = tg_state.conversation_history[-100:] if tg_state.conversation_history else []
 
     # 构建当前用户消息内容（支持图片）
     if images:
@@ -425,7 +669,9 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
     else:
         extra_hint = "\n\n【当前对话提示】普通闲聊，3~5句自然回应。"
 
-    messages = [{"role": "system", "content": enhanced_prompt + "\n" + STYLE_HINT + extra_hint}]
+    now = get_local_now()
+    time_hint = f"\n\n【当前时间】现在是{now.strftime('%Y年%m月%d日 %H:%M')}，美东时间。"
+    messages = [{"role": "system", "content": enhanced_prompt + "\n" + STYLE_HINT + extra_hint + time_hint}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_content})
 
@@ -453,7 +699,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
                 tg_state.conversation_history.append({"role": "assistant", "content": reply})
             # 只保留最近60条
             if len(tg_state.conversation_history) > 60:
-                tg_state.conversation_history = tg_state.conversation_history[-120:]
+                tg_state.conversation_history = tg_state.conversation_history[-500:]
 
             session_id = str(uuid.uuid4())[:8]
             if MEMORY_ENABLED:

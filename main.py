@@ -463,7 +463,7 @@ async def process_buffered_messages():
 
     await detect_and_switch_mode(combined_text)
 
-    reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages))
+    reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages), raw_parts=text_parts)
 
     parts = [l.strip() for l in reply.split("\n") if l.strip()]
     if not parts:
@@ -598,7 +598,7 @@ def is_serious_conversation(text: str, buffer_count: int) -> bool:
     return False
 
 
-async def generate_telegram_reply(user_text: str, images: list = None, buffer_count: int = 1) -> str:
+async def generate_telegram_reply(user_text: str, images: list = None, buffer_count: int = 1, raw_parts: list = None) -> str:
     if MEMORY_ENABLED:
         enhanced_prompt = await build_system_prompt_with_memories(user_text)
     else:
@@ -647,12 +647,19 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
             data = resp.json()
             reply = data["choices"][0]["message"]["content"].strip()
 
-            # 保存到对话历史
-            tg_state.conversation_history.append({"role": "user", "content": user_text})
-            tg_state.conversation_history.append({"role": "assistant", "content": reply})
-            # 只保留最近40条
-            if len(tg_state.conversation_history) > 40:
-                tg_state.conversation_history = tg_state.conversation_history[-40:]
+            # 保存到对话历史（每条消息分开存，保留上下文精度）
+            if raw_parts and len(raw_parts) > 1:
+                # 多条消息：每条单独作为一个user turn存入历史
+                for part in raw_parts:
+                    tg_state.conversation_history.append({"role": "user", "content": part})
+                # 最后一条user后面跟assistant回复
+                tg_state.conversation_history.append({"role": "assistant", "content": reply})
+            else:
+                tg_state.conversation_history.append({"role": "user", "content": user_text})
+                tg_state.conversation_history.append({"role": "assistant", "content": reply})
+            # 只保留最近60条
+            if len(tg_state.conversation_history) > 60:
+                tg_state.conversation_history = tg_state.conversation_history[-60:]
 
             session_id = str(uuid.uuid4())[:8]
             if MEMORY_ENABLED:

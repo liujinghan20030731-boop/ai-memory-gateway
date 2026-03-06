@@ -617,7 +617,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
     # 构建对话历史（最近20条）
-    history = tg_state.conversation_history[-20:] if tg_state.conversation_history else []
+    history = tg_state.conversation_history[-40:] if tg_state.conversation_history else []
 
     # 构建当前用户消息内容（支持图片）
     if images:
@@ -669,7 +669,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
                 tg_state.conversation_history.append({"role": "assistant", "content": reply})
             # 只保留最近60条
             if len(tg_state.conversation_history) > 60:
-                tg_state.conversation_history = tg_state.conversation_history[-60:]
+                tg_state.conversation_history = tg_state.conversation_history[-120:]
 
             session_id = str(uuid.uuid4())[:8]
             if MEMORY_ENABLED:

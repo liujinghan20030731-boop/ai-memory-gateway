@@ -235,13 +235,14 @@ async def add_to_icloud_calendar(title: str, deadline: datetime) -> bool:
 async def parse_ddl_from_message(text: str) -> dict | None:
     """用LLM从消息中提取DDL信息"""
     now = get_local_now()
-    prompt = f"""现在是{now.strftime('%Y-%m-%d %H:%M')}（美东时间）。
-从下面这句话里提取作业/任务的DDL信息，如果有的话。
-返回JSON格式，只返回JSON，不要其他内容：
-{{"title": "作业名称", "deadline": "YYYY-MM-DD HH:MM"}}
-如果没有DDL信息，返回：{{"title": null, "deadline": null}}
-
-用户消息：{text}"""
+    year = now.year
+    prompt = (
+        f"今天是{now.strftime('%Y-%m-%d')}，美东时间。"
+        f"从下面消息里提取作业DDL。"
+        f'只输出一行JSON，格式：{{"title":"名称","deadline":"YYYY-MM-DD HH:MM"}}。'
+        f"deadline用数字日期，不用中文。没有DDL就输出：null。"
+        f"消息：{text}"
+    )
 
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     body = {
@@ -256,10 +257,13 @@ async def parse_ddl_from_message(text: str) -> dict | None:
             print(f"📅 DDL解析原始结果: {raw}")
             # 清理各种格式问题
             raw = re.sub(r"```json|```", "", raw).strip()
+            if raw.strip().lower() == "null" or raw.strip() == "":
+                return None
             # 把中文引号换成英文引号
-            raw = raw.replace('"', '"').replace('"', '"').replace("'", "'").replace("'", "'")
+            raw = raw.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+            raw = raw.replace('，', ',').replace('：', ':')
             # 提取第一个JSON对象
-            match = re.search(r'\{.*?\}', raw, re.DOTALL)
+            match = re.search(r'\{[^}]+\}', raw, re.DOTALL)
             if match:
                 raw = match.group(0)
             data = json.loads(raw)

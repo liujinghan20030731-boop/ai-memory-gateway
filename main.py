@@ -627,19 +627,19 @@ async def sick_mode_checker():
 
 
 async def angry_mode_checker():
-    await asyncio.sleep(2 * 3600)
+    await asyncio.sleep(20 * 60)
     if tg_state.mode != Mode.ANGRY:
         return
     msg = await generate_message("angry_hug_1")
     await send_telegram_message(msg)
-    print("📨 生气模式：2小时哄")
+    print("📨 生气模式：20分钟哄")
 
-    await asyncio.sleep(1 * 3600)
+    await asyncio.sleep(20 * 60)
     if tg_state.mode != Mode.ANGRY:
         return
     msg = await generate_message("angry_hug_2")
     await send_telegram_message(msg)
-    print("📨 生气模式：3小时哄")
+    print("📨 生气模式：40分钟哄")
 
 
 # ============================================================

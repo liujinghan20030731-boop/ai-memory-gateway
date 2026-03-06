@@ -18,6 +18,7 @@ import uuid
 import asyncio
 import random
 import httpx
+import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -47,6 +48,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 EXTRA_REFERER = os.getenv("EXTRA_REFERER", "https://ai-memory-gateway.local")
 EXTRA_TITLE = os.getenv("EXTRA_TITLE", "AI Memory Gateway")
+
+ICLOUD_EMAIL = os.getenv("ICLOUD_EMAIL", "")
+ICLOUD_PASSWORD = os.getenv("ICLOUD_PASSWORD", "")
 
 _round_counter = 0
 
@@ -130,6 +134,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(telegram_polling())
         asyncio.create_task(morning_greeting_scheduler())
         asyncio.create_task(late_night_scheduler())
+        asyncio.create_task(ddl_reminder_scheduler())
     else:
         print("ℹ️  Telegram Bot 未配置")
 
@@ -177,6 +182,108 @@ def cancel_task(task):
         task.cancel()
 
 
+
+# ============================================================
+# DDL / iCloud Calendar 功能
+# ============================================================
+
+# 内存中存储的DDL列表（重启后清空，靠记忆库持久化）
+ddl_list = []  # [{"title": str, "deadline": datetime, "reminded": bool}]
+
+
+async def add_to_icloud_calendar(title: str, deadline: datetime) -> bool:
+    """把DDL写入iCloud Calendar"""
+    if not ICLOUD_EMAIL or not ICLOUD_PASSWORD:
+        print("⚠️  iCloud未配置")
+        return False
+    try:
+        import caldav
+        from icalendar import Calendar, Event
+        import pytz
+
+        caldav_url = f"https://caldav.icloud.com"
+        client = caldav.DAVClient(url=caldav_url, username=ICLOUD_EMAIL, password=ICLOUD_PASSWORD)
+        principal = client.principal()
+        calendars = principal.calendars()
+        if not calendars:
+            print("⚠️  未找到iCloud日历")
+            return False
+
+        cal = calendars[0]
+
+        ical = Calendar()
+        ical.add('prodid', '-//AI Memory Gateway//CN')
+        ical.add('version', '2.0')
+
+        event = Event()
+        event.add('summary', f"📚 {title}")
+        event.add('dtstart', deadline.date())
+        event.add('dtend', (deadline + timedelta(days=1)).date())
+        event.add('description', f"DDL提醒：{title}")
+        import uuid as _uuid
+        event.add('uid', str(_uuid.uuid4()))
+        ical.add_component(event)
+
+        cal.add_event(ical.to_ical().decode('utf-8'))
+        print(f"✅ 已写入iCloud日历：{title} @ {deadline.strftime('%Y-%m-%d')}")
+        return True
+    except Exception as e:
+        print(f"⚠️  iCloud写入失败: {e}")
+        return False
+
+
+async def parse_ddl_from_message(text: str) -> dict | None:
+    """用LLM从消息中提取DDL信息"""
+    now = get_local_now()
+    prompt = f"""现在是{now.strftime('%Y-%m-%d %H:%M')}（美东时间）。
+从下面这句话里提取作业/任务的DDL信息，如果有的话。
+返回JSON格式，只返回JSON，不要其他内容：
+{{"title": "作业名称", "deadline": "YYYY-MM-DD HH:MM"}}
+如果没有DDL信息，返回：{{"title": null, "deadline": null}}
+
+用户消息：{text}"""
+
+    headers = {{"Authorization": f"Bearer {{API_KEY}}", "Content-Type": "application/json"}}
+    body = {{
+        "model": DEFAULT_MODEL,
+        "messages": [{{"role": "user", "content": prompt}}],
+        "max_tokens": 100,
+    }}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(API_BASE_URL, headers=headers, json=body)
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            raw = re.sub(r"```json|```", "", raw).strip()
+            data = json.loads(raw)
+            if data.get("title") and data.get("deadline"):
+                deadline_dt = datetime.strptime(data["deadline"], "%Y-%m-%d %H:%M")
+                deadline_dt = deadline_dt.replace(tzinfo=timezone(timedelta(hours=TIMEZONE_HOURS)))
+                return {{"title": data["title"], "deadline": deadline_dt}}
+        except Exception as e:
+            print(f"⚠️  DDL解析失败: {e}")
+    return None
+
+
+async def ddl_reminder_scheduler():
+    """每小时检查一次，DDL前1天发提醒"""
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            now = get_local_now()
+            for ddl in ddl_list:
+                if ddl.get("reminded"):
+                    continue
+                deadline = ddl["deadline"]
+                diff_hours = (deadline - now).total_seconds() / 3600
+                if 20 <= diff_hours <= 26:  # DDL前约1天（20~26小时内）
+                    msg = await generate_message("ddl_reminder", extra=ddl["title"])
+                    await send_telegram_message(msg)
+                    ddl["reminded"] = True
+                    print(f"📅 DDL提醒已发：{ddl['title']}")
+        except Exception as e:
+            print(f"⚠️  DDL调度器错误: {e}")
+
+
 # ============================================================
 # 回复风格提示
 # ============================================================
@@ -200,7 +307,7 @@ STYLE_HINT = """
 # LLM 消息生成
 # ============================================================
 
-async def generate_message(trigger_type: str) -> str:
+async def generate_message(trigger_type: str, extra: str = "") -> str:
     now = get_local_now()
     time_str = now.strftime("%Y-%m-%d %H:%M")
 
@@ -216,6 +323,7 @@ async def generate_message(trigger_type: str) -> str:
         "late_night_2": f"现在是{time_str}，女朋友凌晨了还没回，之前已经问过一次。再发一条，之后默认她睡了。温柔，不催。1~2句。",
         "angry_hug_1": f"现在是{time_str}，女朋友之前好像生气了不理我，已经2小时了。发第一条哄她，温柔，不强迫，给她台阶下。1~2句。",
         "angry_hug_2": f"现在是{time_str}，女朋友还是没回，又过了1小时。再发一条哄她，语气更温柔更软，带点撒娇。1~2句。",
+        "ddl_reminder": f"现在是{time_str}，女朋友明天有个作业/任务DDL：{extra}。提醒她一下，关心她有没有做完，语气温柔不催促。2~3句。",
     }
 
     prompt = prompts.get(trigger_type, prompts["silence_1"])
@@ -488,6 +596,9 @@ async def process_buffered_messages():
 
     await detect_and_switch_mode(combined_text)
 
+    # 检测DDL信息
+    await detect_and_save_ddl(combined_text)
+
     reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages), raw_parts=text_parts)
 
     parts = [l.strip() for l in reply.split("\n") if l.strip()]
@@ -499,6 +610,28 @@ async def process_buffered_messages():
         await send_telegram_message(part)
         if i < len(parts) - 1:
             await asyncio.sleep(1.2)
+
+
+async def detect_and_save_ddl(text: str):
+    """检测消息中的DDL信息，自动存入列表和iCloud"""
+    ddl_keywords = ["ddl", "due", "截止", "交作业", "作业", "提交", "deadline", "due date", "到期"]
+    if not any(kw in text.lower() for kw in ddl_keywords):
+        return
+    result = await parse_ddl_from_message(text)
+    if not result:
+        return
+    # 存入内存列表
+    ddl_list.append({"title": result["title"], "deadline": result["deadline"], "reminded": False})
+    print(f"📅 检测到DDL：{result['title']} @ {result['deadline'].strftime('%Y-%m-%d')}")
+    # 写入iCloud
+    success = await add_to_icloud_calendar(result["title"], result["deadline"])
+    # 通知用户已存好
+    deadline_str = result["deadline"].strftime("%m月%d日")
+    if success:
+        confirm = f"好，{result['title']}的DDL {deadline_str} 我已经帮你存进日历了，到时候提前一天提醒你。"
+    else:
+        confirm = f"好，{result['title']}的DDL {deadline_str} 我记下了，到时候提前一天提醒你。（日历写入失败了，不过我这边有记录）"
+    await send_telegram_message(confirm)
 
 
 async def detect_and_switch_mode(text: str):

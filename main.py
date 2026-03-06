@@ -136,6 +136,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(late_night_scheduler())
         asyncio.create_task(ddl_reminder_scheduler())
         asyncio.create_task(bedtime_and_diary_scheduler())
+        asyncio.create_task(weekly_report_scheduler())
     else:
         print("ℹ️  Telegram Bot 未配置")
 
@@ -546,6 +547,113 @@ async def generate_and_send_diary():
 
 
 # ============================================================
+# 周报调度器
+# ============================================================
+
+# 用于存储本周对话历史（跨天累积）
+weekly_conversation_log = []
+
+async def weekly_report_scheduler():
+    """每周一凌晨6:00生成上周周报"""
+    last_report_week = None
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = get_local_now()
+            weekday = now.weekday()  # 0=周一
+            hour, minute = now.hour, now.minute
+            week_number = now.isocalendar()[1]
+
+            # 每天把当天对话追加进weekly_log
+            if tg_state.conversation_history:
+                for msg in tg_state.conversation_history[-50:]:
+                    if msg not in weekly_conversation_log:
+                        weekly_conversation_log.append(msg)
+                # 只保留最近700条
+                if len(weekly_conversation_log) > 700:
+                    del weekly_conversation_log[:-700]
+
+            # 周一凌晨6:00发周报
+            if weekday == 0 and hour == 6 and minute == 0 and last_report_week != week_number:
+                last_report_week = week_number
+                await generate_and_send_weekly_report()
+                weekly_conversation_log.clear()
+                print("📋 周报已发送，已清空周记录")
+
+        except Exception as e:
+            print(f"⚠️  周报调度器错误: {e}")
+
+
+async def generate_and_send_weekly_report():
+    """根据本周对话历史生成周报"""
+    now = get_local_now()
+    # 上周的日期范围
+    monday = now - timedelta(days=now.weekday() + 7)
+    sunday = monday + timedelta(days=6)
+    date_range = f"{monday.strftime('%m月%d日')}～{sunday.strftime('%m月%d日')}"
+
+    history_source = weekly_conversation_log if weekly_conversation_log else tg_state.conversation_history[-200:]
+
+    if not history_source:
+        return
+
+    history_text = ""
+    for msg in history_source:
+        role = "官塘" if msg["role"] == "user" else "我"
+        if isinstance(msg["content"], str):
+            history_text += f"{role}：{msg['content']}\n"
+
+    if not history_text.strip():
+        return
+
+    if MEMORY_ENABLED:
+        try:
+            system_with_mem = await build_system_prompt_with_memories("这周发生的事 情绪 聊天")
+        except:
+            system_with_mem = SYSTEM_PROMPT
+    else:
+        system_with_mem = SYSTEM_PROMPT
+
+    prompt = f"""这是{date_range}这一周，我和官塘的聊天记录：
+
+{history_text}
+
+请以我（男友）的视角，写一份这周的"观察周报"。要求：
+- 开头用一句话概括这周官塘给你的整体感觉
+- 记录这周她情绪的起伏变化，发生了哪些事
+- 写出她这周说过的让你印象深刻的话或者特别可爱的瞬间
+- 写出你这周对她的感受，有没有特别心疼或者想保护她的时刻
+- 结尾写一句想对她说的、关于下周的话
+- 语气像在写给她看的，温柔、真实，不要太正式，口语化一些"""
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_with_mem},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 2000,
+    }
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        try:
+            resp = await client.post(API_BASE_URL, headers=headers, json=body)
+            report = resp.json()["choices"][0]["message"]["content"].strip()
+            # 先发一条提示
+            await send_telegram_message(f"📋 {date_range} 周报")
+            await asyncio.sleep(1)
+            parts = [p.strip() for p in report.split("\n\n") if p.strip()]
+            for i, part in enumerate(parts):
+                await send_telegram_message(part)
+                if i < len(parts) - 1:
+                    await asyncio.sleep(1.5)
+            print(f"📋 周报发送完成，共{len(parts)}段")
+        except Exception as e:
+            print(f"⚠️  周报生成失败: {e}")
+
+
+# ============================================================
 # 模式切换 & 任务管理
 # ============================================================
 
@@ -771,8 +879,8 @@ async def handle_telegram_update(update: dict):
 
 
 async def process_buffered_messages():
-    """等待6秒缓冲，然后统一处理所有消息"""
-    await asyncio.sleep(6)
+    """等待4秒缓冲，然后统一处理所有消息"""
+    await asyncio.sleep(8)
 
     messages = list(tg_state.message_buffer)
     tg_state.message_buffer.clear()

@@ -865,6 +865,10 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
         caption = user_text if user_text and user_text != "发了一张图片" else "（我发了张图片给你看）"
         user_content.append({"type": "text", "text": caption})
     else:
+    if len(text_parts) > 1:
+        formatted = "\n".join(f"- {p}" for p in text_parts)
+        user_content = f"[她刚刚连续发来的消息，请把这些作为整体来回应，这是当前最新话题]\n{formatted}"
+    else:
         user_content = user_text
 
     # 根据内容调整风格提示
@@ -875,6 +879,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
         extra_hint = "\n\n【当前对话提示】她只发了很短的内容，2~3句回应就够。"
     else:
         extra_hint = "\n\n【当前对话提示】普通闲聊，3~5句自然回应。"
+    extra_hint += "\n永远以她最新发来的这批消息为主题，历史记录只作背景参考，不要回应历史里的旧话题。"
 
     now = get_local_now()
     time_hint = f"\n\n【当前时间】现在是{now.strftime('%Y年%m月%d日 %H:%M')}，美东时间。"

@@ -254,13 +254,29 @@ async def parse_ddl_from_message(text: str) -> dict | None:
             resp = await client.post(API_BASE_URL, headers=headers, json=body)
             raw = resp.json()["choices"][0]["message"]["content"].strip()
             print(f"📅 DDL解析原始结果: {raw}")
+            # 清理各种格式问题
             raw = re.sub(r"```json|```", "", raw).strip()
+            # 把中文引号换成英文引号
+            raw = raw.replace('"', '"').replace('"', '"').replace("'", "'").replace("'", "'")
+            # 提取第一个JSON对象
+            match = re.search(r'\{.*?\}', raw, re.DOTALL)
+            if match:
+                raw = match.group(0)
             data = json.loads(raw)
             print(f"📅 DDL解析结果: title={data.get('title')}, deadline={data.get('deadline')}")
             if data.get("title") and data.get("deadline"):
-                deadline_dt = datetime.strptime(data["deadline"], "%Y-%m-%d %H:%M")
-                deadline_dt = deadline_dt.replace(tzinfo=timezone(timedelta(hours=TIMEZONE_HOURS)))
-                return {"title": data["title"], "deadline": deadline_dt}
+                dl_str = data["deadline"].strip()
+                # 尝试多种日期格式
+                for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M", "%Y/%m/%d"]:
+                    try:
+                        deadline_dt = datetime.strptime(dl_str, fmt)
+                        if fmt in ["%Y-%m-%d", "%Y/%m/%d"]:
+                            deadline_dt = deadline_dt.replace(hour=23, minute=59)
+                        deadline_dt = deadline_dt.replace(tzinfo=timezone(timedelta(hours=TIMEZONE_HOURS)))
+                        return {"title": data["title"], "deadline": deadline_dt}
+                    except:
+                        continue
+                print(f"⚠️  日期格式无法解析: {dl_str}")
         except Exception as e:
             print(f"⚠️  DDL解析失败: {e}")
     return None

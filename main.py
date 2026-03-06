@@ -546,6 +546,149 @@ async def generate_and_send_diary():
 
 
 # ============================================================
+# 模式切换 & 任务管理
+# ============================================================
+
+def enter_mode(mode: str):
+    tg_state.mode = mode
+    tg_state.mode_start_time = get_local_now()
+    cancel_task(tg_state.mode_task)
+    cancel_task(tg_state.silence_task)
+    print(f"🔄 模式切换: {mode}")
+    if mode == Mode.BUSY:
+        tg_state.mode_task = asyncio.create_task(busy_mode_checker())
+    elif mode == Mode.SICK:
+        tg_state.mode_task = asyncio.create_task(sick_mode_checker())
+    elif mode == Mode.ANGRY:
+        tg_state.mode_task = asyncio.create_task(angry_mode_checker())
+    elif mode == Mode.NORMAL:
+        reset_silence_checker()
+
+
+def reset_silence_checker():
+    cancel_task(tg_state.silence_task)
+    if tg_state.mode == Mode.NORMAL and is_active_hours():
+        tg_state.silence_task = asyncio.create_task(silence_checker())
+
+
+async def silence_checker():
+    delays = [(20, 30), (40, 60), (60, 90)]
+    trigger_types = ["silence_1", "silence_2", "silence_3"]
+
+    for i, ((min_d, max_d), trigger_type) in enumerate(zip(delays, trigger_types)):
+        delay = random.randint(min_d, max_d)
+        print(f"⏳ 沉默检测第{i+1}次，将在{delay}分钟后触发")
+        await asyncio.sleep(delay * 60)
+
+        if tg_state.mode != Mode.NORMAL:
+            print(f"⏭️  沉默触发{i+1}跳过：当前模式={tg_state.mode}")
+            return
+        if not is_active_hours():
+            print(f"⏭️  沉默触发{i+1}跳过：非活跃时段")
+            return
+        if tg_state.last_message_time:
+            elapsed = (get_local_now() - tg_state.last_message_time).total_seconds() / 60
+            print(f"⏱️  距上次消息已 {elapsed:.1f} 分钟")
+            if elapsed < min_d - 5:
+                print(f"⏭️  沉默触发{i+1}跳过：有新消息")
+                return
+
+        msg = await generate_message(trigger_type)
+        await send_telegram_message(msg)
+        print(f"📨 沉默触发第{i+1}次发送完成")
+
+
+async def busy_mode_checker():
+    await asyncio.sleep(4 * 3600)
+    if tg_state.mode != Mode.BUSY:
+        return
+    msg = await generate_message("busy_check_1")
+    await send_telegram_message(msg)
+    print("📨 忙碌模式：4小时关心")
+
+    await asyncio.sleep(1 * 3600)
+    if tg_state.mode != Mode.BUSY:
+        return
+    if tg_state.last_message_time and (get_local_now() - tg_state.last_message_time).total_seconds() < 55 * 60:
+        return
+    msg = await generate_message("busy_check_2")
+    await send_telegram_message(msg)
+    print("📨 忙碌模式：5小时关心")
+
+
+async def sick_mode_checker():
+    while tg_state.mode == Mode.SICK:
+        await asyncio.sleep(3600)
+        if tg_state.mode != Mode.SICK:
+            return
+        msg = await generate_message("sick_check")
+        await send_telegram_message(msg)
+        print("📨 生病模式：1小时关心")
+
+
+async def angry_mode_checker():
+    await asyncio.sleep(2 * 3600)
+    if tg_state.mode != Mode.ANGRY:
+        return
+    msg = await generate_message("angry_hug_1")
+    await send_telegram_message(msg)
+    print("📨 生气模式：2小时哄")
+
+    await asyncio.sleep(1 * 3600)
+    if tg_state.mode != Mode.ANGRY:
+        return
+    msg = await generate_message("angry_hug_2")
+    await send_telegram_message(msg)
+    print("📨 生气模式：3小时哄")
+
+
+# ============================================================
+# 凌晨未说晚安检测
+# ============================================================
+
+async def late_night_scheduler():
+    last_check_date = None
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = get_local_now()
+            today = now.date()
+            hour, minute = now.hour, now.minute
+
+            if hour == 2 and minute == 0 and last_check_date != today:
+                last_check_date = today
+                if tg_state.mode == Mode.SLEEP:
+                    continue
+                # 检查过去30分钟内有没有消息
+                if tg_state.last_message_time:
+                    elapsed = (now - tg_state.last_message_time).total_seconds() / 60
+                    if elapsed < 30:
+                        continue
+                # 没说晚安，发第一条提醒
+                msg = await generate_message("late_night_1")
+                await send_telegram_message(msg)
+                print("🌙 凌晨提醒第1次")
+
+                # 等30分钟，再看看
+                await asyncio.sleep(30 * 60)
+                now2 = get_local_now()
+                if tg_state.mode == Mode.SLEEP:
+                    continue
+                if tg_state.last_message_time:
+                    elapsed2 = (now2 - tg_state.last_message_time).total_seconds() / 60
+                    if elapsed2 < 25:
+                        continue
+                # 还是没回，发第二条，然后自动进入睡眠模式
+                msg2 = await generate_message("late_night_2")
+                await send_telegram_message(msg2)
+                enter_mode(Mode.SLEEP)
+                print("🌙 凌晨提醒第2次，进入睡眠模式")
+
+        except Exception as e:
+            print(f"⚠️  凌晨调度器错误: {e}")
+
+
+# ============================================================
 # Telegram Polling
 # ============================================================
 

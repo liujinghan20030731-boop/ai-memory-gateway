@@ -627,19 +627,19 @@ async def sick_mode_checker():
 
 
 async def angry_mode_checker():
-    await asyncio.sleep(20 * 60)   # 20分钟
+    await asyncio.sleep(2 * 3600)
     if tg_state.mode != Mode.ANGRY:
         return
     msg = await generate_message("angry_hug_1")
     await send_telegram_message(msg)
-    print("📨 生气模式：20分钟哄")
+    print("📨 生气模式：2小时哄")
 
-    await asyncio.sleep(20 * 60)   # 再等20分钟
+    await asyncio.sleep(1 * 3600)
     if tg_state.mode != Mode.ANGRY:
         return
     msg = await generate_message("angry_hug_2")
     await send_telegram_message(msg)
-    print("📨 生气模式：40分钟哄")
+    print("📨 生气模式：3小时哄")
 
 
 # ============================================================
@@ -865,11 +865,11 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
         caption = user_text if user_text and user_text != "发了一张图片" else "（我发了张图片给你看）"
         user_content.append({"type": "text", "text": caption})
     else:
-    if len(text_parts) > 1:
-        formatted = "\n".join(f"- {p}" for p in text_parts)
-        user_content = f"[她刚刚连续发来的消息，请把这些作为整体来回应，这是当前最新话题]\n{formatted}"
-    else:
-        user_content = user_text
+        if raw_parts and len(raw_parts) > 1:
+            formatted = "\n".join(f"- {p}" for p in raw_parts)
+            user_content = f"[她刚刚连续发来的消息，请把这些作为整体来回应，这是当前最新话题]\n{formatted}"
+        else:
+            user_content = user_text
 
     # 根据内容调整风格提示
     serious = is_serious_conversation(user_text, buffer_count)

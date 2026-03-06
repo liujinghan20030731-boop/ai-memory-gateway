@@ -285,6 +285,14 @@ async def morning_greeting_scheduler():
                     tg_state.last_morning_date != today and
                     tg_state.mode != Mode.SLEEP):
                 tg_state.last_morning_date = today
+                # 如果今天7点之后到早安时间之间有过对话，说明已经醒了，跳过早安
+                if tg_state.last_message_time:
+                    last_dt = tg_state.last_message_time
+                    wake_window_start = now.replace(hour=7, minute=0, second=0, microsecond=0)
+                    wake_window_end = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                    if wake_window_start <= last_dt <= wake_window_end:
+                        print(f"⏭️  早安跳过：7点后早安前已聊过天，用户已醒")
+                        continue
                 msg = await generate_message("morning")
                 await send_telegram_message(msg)
                 print(f"📨 早安: {msg[:30]}")

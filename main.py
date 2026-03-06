@@ -770,6 +770,70 @@ async def handle_telegram_update(update: dict):
     tg_state.buffer_task = asyncio.create_task(process_buffered_messages())
 
 
+async def process_buffered_messages():
+    """等待4秒缓冲，然后统一处理所有消息"""
+    await asyncio.sleep(4)
+
+    messages = list(tg_state.message_buffer)
+    tg_state.message_buffer.clear()
+
+    if not messages:
+        return
+
+    # 分离文字和图片
+    text_parts = []
+    images = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("type") == "image":
+            images.append(msg)
+            if msg.get("caption"):
+                text_parts.append(msg["caption"])
+        else:
+            text_parts.append(str(msg))
+
+    combined_text = " ".join(text_parts).strip()
+    print(f"处理缓冲消息（文字{len(text_parts)}条，图片{len(images)}帧）")
+
+    if not combined_text and not images:
+        return
+
+    await detect_and_switch_mode(combined_text)
+
+    # 检测DDL信息（出错不影响正常聊天）
+    try:
+        await detect_and_save_ddl(combined_text)
+    except Exception as e:
+        print(f"⚠️  DDL检测出错（不影响聊天）: {e}")
+
+    reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages), raw_parts=text_parts)
+
+    if not reply:
+        return
+
+    # 分段发送
+    parts = [p.strip() for p in reply.split("\n") if p.strip()]
+    max_parts = 9
+
+    # 存入对话历史（每条消息单独存）
+    for part in text_parts:
+        if part.strip():
+            tg_state.conversation_history.append({"role": "user", "content": part.strip()})
+    tg_state.conversation_history.append({"role": "assistant", "content": reply})
+    tg_state.conversation_history = tg_state.conversation_history[-500:]
+
+    for i, part in enumerate(parts[:max_parts]):
+        await send_telegram_message(part)
+        if i < len(parts) - 1:
+            await asyncio.sleep(1.2)
+
+    # 后台提取记忆
+    if MEMORY_ENABLED and combined_text:
+        session_id = str(uuid.uuid4())
+        asyncio.create_task(process_memories_background(
+            session_id, combined_text, reply, DEFAULT_MODEL
+        ))
+
+
 def is_serious_conversation(text: str, buffer_count: int) -> bool:
     """判断是否是正经对话（字数多或消息多）"""
     if len(text) > 150:

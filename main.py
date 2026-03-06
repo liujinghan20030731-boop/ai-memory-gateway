@@ -627,19 +627,19 @@ async def sick_mode_checker():
 
 
 async def angry_mode_checker():
-    await asyncio.sleep(20 * 60)
+    await asyncio.sleep(2 * 3600)
     if tg_state.mode != Mode.ANGRY:
         return
     msg = await generate_message("angry_hug_1")
     await send_telegram_message(msg)
-    print("📨 生气模式：20分钟哄")
+    print("📨 生气模式：2小时哄")
 
-    await asyncio.sleep(20 * 60)
+    await asyncio.sleep(1 * 3600)
     if tg_state.mode != Mode.ANGRY:
         return
     msg = await generate_message("angry_hug_2")
     await send_telegram_message(msg)
-    print("📨 生气模式：40分钟哄")
+    print("📨 生气模式：3小时哄")
 
 
 # ============================================================
@@ -772,7 +772,7 @@ async def handle_telegram_update(update: dict):
 
 async def process_buffered_messages():
     """等待4秒缓冲，然后统一处理所有消息"""
-    await asyncio.sleep(4)
+    await asyncio.sleep(8)
 
     messages = list(tg_state.message_buffer)
     tg_state.message_buffer.clear()
@@ -866,7 +866,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
         user_content.append({"type": "text", "text": caption})
     else:
         if raw_parts and len(raw_parts) > 1:
-            formatted = "\n".join(f"- {p}" for p in raw_parts)
+            formatted = " ".join(raw_parts)
             user_content = f"[她刚刚连续发来的消息，请把这些作为整体来回应，这是当前最新话题]\n{formatted}"
         else:
             user_content = user_text

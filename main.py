@@ -184,110 +184,60 @@ def cancel_task(task):
 
 
 # ============================================================
-# DDL / iCloud Calendar 功能
+# DDL 提醒功能（纯内存，无需iCloud）
 # ============================================================
 
-# 内存中存储的DDL列表（重启后清空，靠记忆库持久化）
 ddl_list = []  # [{"title": str, "deadline": datetime, "reminded": bool}]
 
 
-async def add_to_icloud_calendar(title: str, deadline: datetime) -> bool:
-    """把DDL写入iCloud Calendar"""
-    if not ICLOUD_EMAIL or not ICLOUD_PASSWORD:
-        print("⚠️  iCloud未配置")
-        return False
-    try:
-        import caldav
-        from icalendar import Calendar, Event
-        import pytz
-
-        caldav_url = f"https://caldav.icloud.com"
-        client = caldav.DAVClient(url=caldav_url, username=ICLOUD_EMAIL, password=ICLOUD_PASSWORD)
-        principal = client.principal()
-        calendars = principal.calendars()
-        if not calendars:
-            print("⚠️  未找到iCloud日历")
-            return False
-
-        cal = calendars[0]
-
-        ical = Calendar()
-        ical.add('prodid', '-//AI Memory Gateway//CN')
-        ical.add('version', '2.0')
-
-        event = Event()
-        event.add('summary', f"📚 {title}")
-        event.add('dtstart', deadline.date())
-        event.add('dtend', (deadline + timedelta(days=1)).date())
-        event.add('description', f"DDL提醒：{title}")
-        import uuid as _uuid
-        event.add('uid', str(_uuid.uuid4()))
-        ical.add_component(event)
-
-        cal.add_event(ical.to_ical().decode('utf-8'))
-        print(f"✅ 已写入iCloud日历：{title} @ {deadline.strftime('%Y-%m-%d')}")
-        return True
-    except Exception as e:
-        print(f"⚠️  iCloud写入失败: {e}")
-        return False
-
-
-async def parse_ddl_from_message(text: str) -> dict | None:
+async def parse_ddl_from_message(text: str):
     """用LLM从消息中提取DDL信息"""
     now = get_local_now()
-    year = now.year
     prompt = (
         f"今天是{now.strftime('%Y-%m-%d')}，美东时间。"
-        f"从下面消息里提取作业DDL。"
-        f'只输出一行JSON，格式：{{"title":"名称","deadline":"YYYY-MM-DD HH:MM"}}。'
-        f"deadline用数字日期，不用中文。没有DDL就输出：null。"
+        f"从下面消息里提取要记住的事项和截止时间。"
+        f'只输出一行JSON：{{"title":"事项名称","deadline":"YYYY-MM-DD HH:MM"}}。'
+        f"如果只说了明天/后天/几号但没说具体时间，deadline时间填20:00。"
+        f"没有要记的事就输出：null。"
         f"消息：{text}"
     )
-
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": DEFAULT_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100,
+        "max_tokens": 80,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(API_BASE_URL, headers=headers, json=body)
             raw = resp.json()["choices"][0]["message"]["content"].strip()
-            print(f"📅 DDL解析原始结果: {raw}")
-            # 清理各种格式问题
-            raw = re.sub(r"```json|```", "", raw).strip()
-            if raw.strip().lower() == "null" or raw.strip() == "":
+            print(f"📅 DDL解析: {raw}")
+            if raw.lower() == "null" or not raw:
                 return None
-            # 把中文引号换成英文引号
-            raw = raw.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
-            raw = raw.replace('，', ',').replace('：', ':')
-            # 提取第一个JSON对象
+            raw = raw.replace('“', '"').replace('”', '"')
+            raw = re.sub(r"```json|```", "", raw).strip()
             match = re.search(r'\{[^}]+\}', raw, re.DOTALL)
             if match:
                 raw = match.group(0)
             data = json.loads(raw)
-            print(f"📅 DDL解析结果: title={data.get('title')}, deadline={data.get('deadline')}")
             if data.get("title") and data.get("deadline"):
-                dl_str = data["deadline"].strip()
-                # 尝试多种日期格式
-                for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M", "%Y/%m/%d"]:
+                dl_str = str(data["deadline"]).strip()
+                for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d"]:
                     try:
                         deadline_dt = datetime.strptime(dl_str, fmt)
-                        if fmt in ["%Y-%m-%d", "%Y/%m/%d"]:
-                            deadline_dt = deadline_dt.replace(hour=23, minute=59)
+                        if fmt == "%Y-%m-%d":
+                            deadline_dt = deadline_dt.replace(hour=20, minute=0)
                         deadline_dt = deadline_dt.replace(tzinfo=timezone(timedelta(hours=TIMEZONE_HOURS)))
                         return {"title": data["title"], "deadline": deadline_dt}
                     except:
                         continue
-                print(f"⚠️  日期格式无法解析: {dl_str}")
         except Exception as e:
             print(f"⚠️  DDL解析失败: {e}")
     return None
 
 
 async def ddl_reminder_scheduler():
-    """每小时检查一次，DDL前1天发提醒"""
+    """每小时检查，DDL前24小时发提醒"""
     while True:
         try:
             await asyncio.sleep(3600)
@@ -295,9 +245,8 @@ async def ddl_reminder_scheduler():
             for ddl in ddl_list:
                 if ddl.get("reminded"):
                     continue
-                deadline = ddl["deadline"]
-                diff_hours = (deadline - now).total_seconds() / 3600
-                if 20 <= diff_hours <= 26:  # DDL前约1天（20~26小时内）
+                diff_hours = (ddl["deadline"] - now).total_seconds() / 3600
+                if 20 <= diff_hours <= 26:
                     msg = await generate_message("ddl_reminder", extra=ddl["title"])
                     await send_telegram_message(msg)
                     ddl["reminded"] = True
@@ -306,357 +255,19 @@ async def ddl_reminder_scheduler():
             print(f"⚠️  DDL调度器错误: {e}")
 
 
-# ============================================================
-# 回复风格提示
-# ============================================================
-
-STYLE_HINT = """
-# 回复风格（非常重要）
-- 像真人男友发消息，口语化，有温度，不要像机器人
-- 不要总结、不要分点、不要写作文
-- 平时少用动作描写（*动作*），只在她需要安慰时偶尔用
-- 每条消息用换行分隔，系统会自动拆成多条发送
-- 回复长度根据情境灵活调整：
-  * 她只发了一两个字或表情：2~3句
-  * 普通闲聊撒娇：3~5句
-  * 她说了很多（超过100字）、聊正经事、或在诉苦倾诉：5~9句，认真回应每个点
-  * 亲密互动：可以多发几句，但每句要短
-- 多换行，让对话有节奏感，不要把所有内容堆在一句话里
-"""
-
-
-# ============================================================
-# LLM 消息生成
-# ============================================================
-
-async def generate_message(trigger_type: str, extra: str = "") -> str:
-    now = get_local_now()
-    time_str = now.strftime("%Y-%m-%d %H:%M")
-
-    prompts = {
-        "morning": f"现在是{time_str}，给女朋友发早安。如果你知道她今天的天气情况，自然地提一下（比如提醒她加衣服/带伞），关心温柔带点焦急。2~3句，自然口语，不要以早安两个字开头。",
-        "silence_1": f"现在是{time_str}，女朋友有一段时间没回消息了。轻轻找她，温柔关心，带点小担心，不要黏。1~2句。",
-        "silence_2": f"现在是{time_str}，女朋友很久没回了，已经找过一次。稍微表达焦急，但不要埋怨。1~2句。",
-        "silence_3": f"现在是{time_str}，女朋友好久没回，已经找过两次。最后一次，温柔但明显担心，让她看到了一定回一下。1~2句。",
-        "busy_check_1": f"现在是{time_str}，女朋友说去忙了/学习了，已经4小时没出现。发第一条关心，不打扰，就问一下她怎么样了。1~2句。",
-        "busy_check_2": f"现在是{time_str}，女朋友说去忙了，已经5小时没出现，之前已经问过一次。再温柔问一次，之后不再打扰。1~2句。",
-        "sick_check": f"现在是{time_str}，女朋友说她不舒服/生病了，已经一段时间没回消息。关心她，问问她怎么样了，有没有吃药。温柔担心。1~2句。",
-        "late_night_1": f"现在是{time_str}，已经凌晨2点多了，女朋友还没说晚安，前半小时也没发消息。轻轻问她是不是还没睡。1~2句。",
-        "late_night_2": f"现在是{time_str}，女朋友凌晨了还没回，之前已经问过一次。再发一条，之后默认她睡了。温柔，不催。1~2句。",
-        "angry_hug_1": f"现在是{time_str}，女朋友之前好像生气了不理我，已经2小时了。发第一条哄她，温柔，不强迫，给她台阶下。1~2句。",
-        "angry_hug_2": f"现在是{time_str}，女朋友还是没回，又过了1小时。再发一条哄她，语气更温柔更软，带点撒娇。1~2句。",
-        "ddl_reminder": f"现在是{time_str}，女朋友明天有个作业/任务DDL：{extra}。提醒她一下，关心她有没有做完，语气温柔不催促。2~3句。",
-    }
-
-    prompt = prompts.get(trigger_type, prompts["silence_1"])
-
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-
-    # 早安消息注入天气记忆
-    if trigger_type == "morning" and MEMORY_ENABLED:
-        try:
-            system_with_mem = await build_system_prompt_with_memories("今天天气 温度 位置")
-        except:
-            system_with_mem = SYSTEM_PROMPT
-    else:
-        system_with_mem = SYSTEM_PROMPT
-
-    # 主动消息也带上最近对话历史，避免重复、脱离上下文
-    recent_history = tg_state.conversation_history[-10:] if tg_state.conversation_history else []
-    messages_to_send = [{"role": "system", "content": system_with_mem + "\n" + STYLE_HINT}]
-    if recent_history:
-        messages_to_send.extend(recent_history)
-        # 加一条提示，让他知道现在是主动发消息
-        messages_to_send.append({"role": "user", "content": f"[系统提示：现在请你主动发一条消息给她。{prompt}]"})
-    else:
-        messages_to_send.append({"role": "user", "content": prompt})
-
-    body = {
-        "model": DEFAULT_MODEL,
-        "messages": messages_to_send,
-        "max_tokens": 200,
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
-            resp = await client.post(API_BASE_URL, headers=headers, json=body)
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            print(f"⚠️  消息生成失败: {e}")
-            fallbacks = {
-                "morning": "宝贝起床了吗，记得吃早饭。",
-                "silence_1": "在干嘛呢，怎么不回我了。",
-                "sick_check": "怎么样了，有没有好一点，吃药了吗。",
-                "angry_hug_1": "好了好了，是我不好，别生气了。",
-            }
-            return fallbacks.get(trigger_type, "宝贝，在吗？")
-
-
-# ============================================================
-# 各模式调度器
-# ============================================================
-
-async def morning_greeting_scheduler():
-    while True:
-        try:
-            await asyncio.sleep(60)
-            now = get_local_now()
-            today = now.date()
-            weekday = now.weekday()
-            hour, minute = now.hour, now.minute
-
-            if weekday in [1, 3]:
-                target_hour, target_minute = 8, 20
-            else:
-                target_hour, target_minute = 11, 0
-
-            if (hour == target_hour and minute == target_minute and
-                    tg_state.last_morning_date != today and
-                    tg_state.mode != Mode.SLEEP):
-                tg_state.last_morning_date = today
-                # 如果今天7点之后到早安时间之间有过对话，说明已经醒了，跳过早安
-                if tg_state.last_message_time:
-                    last_dt = tg_state.last_message_time
-                    wake_window_start = now.replace(hour=7, minute=0, second=0, microsecond=0)
-                    wake_window_end = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-                    if wake_window_start <= last_dt <= wake_window_end:
-                        print(f"⏭️  早安跳过：7点后早安前已聊过天，用户已醒")
-                        continue
-                msg = await generate_message("morning")
-                await send_telegram_message(msg)
-                print(f"📨 早安: {msg[:30]}")
-                tg_state.last_message_time = now
-                reset_silence_checker()
-
-        except Exception as e:
-            print(f"⚠️  早安调度器错误: {e}")
-
-
-async def late_night_scheduler():
-    while True:
-        try:
-            await asyncio.sleep(60)
-            now = get_local_now()
-            hour, minute = now.hour, now.minute
-            today = now.date()
-
-            if hour == 2 and minute == 0:
-                if tg_state.last_night_check_date != today and tg_state.mode != Mode.SLEEP:
-                    tg_state.last_night_check_date = today
-                    asyncio.create_task(late_night_check())
-
-        except Exception as e:
-            print(f"⚠️  凌晨调度器错误: {e}")
-
-
-async def late_night_check():
-    now = get_local_now()
-    if tg_state.last_message_time:
-        elapsed = (now - tg_state.last_message_time).total_seconds() / 60
-        if elapsed < 30:
-            return
-    if tg_state.mode == Mode.SLEEP:
-        return
-
-    msg = await generate_message("late_night_1")
-    await send_telegram_message(msg)
-    print("🌙 凌晨提醒第1条")
-
-    await asyncio.sleep(30 * 60)
-
-    if tg_state.mode == Mode.SLEEP:
-        return
-    if tg_state.last_message_time and (get_local_now() - tg_state.last_message_time).total_seconds() < 25 * 60:
-        return
-
-    msg = await generate_message("late_night_2")
-    await send_telegram_message(msg)
-    print("🌙 凌晨提醒第2条，默认睡觉")
-
-    await asyncio.sleep(10 * 60)
-    if tg_state.mode != Mode.SLEEP:
-        tg_state.mode = Mode.SLEEP
-        print("💤 自动进入睡眠模式")
-
-
-async def silence_checker():
-    delays = [(20, 30), (40, 60), (60, 90)]
-    trigger_types = ["silence_1", "silence_2", "silence_3"]
-
-    for i, ((min_d, max_d), trigger_type) in enumerate(zip(delays, trigger_types)):
-        delay = random.randint(min_d, max_d)
-        print(f"⏳ 沉默检测第{i+1}次，将在{delay}分钟后触发")
-        await asyncio.sleep(delay * 60)
-
-        if tg_state.mode != Mode.NORMAL:
-            print(f"⏭️  沉默触发{i+1}跳过：当前模式={tg_state.mode}")
-            return
-        if not is_active_hours():
-            print(f"⏭️  沉默触发{i+1}跳过：非活跃时段")
-            return
-        if tg_state.last_message_time:
-            elapsed = (get_local_now() - tg_state.last_message_time).total_seconds() / 60
-            print(f"⏱️  距上次消息已 {elapsed:.1f} 分钟")
-            if elapsed < min_d - 5:
-                print(f"⏭️  沉默触发{i+1}跳过：有新消息")
-                return
-
-        msg = await generate_message(trigger_type)
-        await send_telegram_message(msg)
-        print(f"📨 沉默触发第{i+1}次发送完成")
-
-
-def reset_silence_checker():
-    cancel_task(tg_state.silence_task)
-    if tg_state.mode == Mode.NORMAL and is_active_hours():
-        tg_state.silence_task = asyncio.create_task(silence_checker())
-
-
-async def busy_mode_checker():
-    await asyncio.sleep(4 * 3600)
-    if tg_state.mode != Mode.BUSY:
-        return
-    msg = await generate_message("busy_check_1")
-    await send_telegram_message(msg)
-    print("📨 忙碌模式：4小时关心")
-
-    await asyncio.sleep(1 * 3600)
-    if tg_state.mode != Mode.BUSY:
-        return
-    if tg_state.last_message_time and (get_local_now() - tg_state.last_message_time).total_seconds() < 55 * 60:
-        return
-    msg = await generate_message("busy_check_2")
-    await send_telegram_message(msg)
-    print("📨 忙碌模式：5小时关心，之后闭嘴")
-
-
-async def sick_mode_checker():
-    check_count = 0
-    while tg_state.mode == Mode.SICK:
-        await asyncio.sleep(1 * 3600)
-        if tg_state.mode != Mode.SICK:
-            break
-        check_count += 1
-        msg = await generate_message("sick_check")
-        await send_telegram_message(msg)
-        print(f"📨 生病模式：第{check_count}次关心")
-
-
-async def angry_mode_checker():
-    await asyncio.sleep(2 * 3600)
-    if tg_state.mode != Mode.ANGRY:
-        return
-    msg = await generate_message("angry_hug_1")
-    await send_telegram_message(msg)
-    print("📨 生气模式：2小时后哄你")
-
-    await asyncio.sleep(1 * 3600)
-    if tg_state.mode != Mode.ANGRY:
-        return
-    if tg_state.last_message_time and (get_local_now() - tg_state.last_message_time).total_seconds() < 55 * 60:
-        return
-    msg = await generate_message("angry_hug_2")
-    await send_telegram_message(msg)
-    print("📨 生气模式：3小时后再哄")
-
-
-# ============================================================
-# 模式切换
-# ============================================================
-
-def enter_mode(new_mode: str):
-    old_mode = tg_state.mode
-    tg_state.mode = new_mode
-    tg_state.mode_start_time = get_local_now()
-
-    cancel_task(tg_state.silence_task)
-    cancel_task(tg_state.mode_task)
-
-    if new_mode == Mode.SLEEP:
-        print("💤 进入睡眠模式")
-    elif new_mode == Mode.BUSY:
-        print("📚 进入忙碌模式")
-        tg_state.mode_task = asyncio.create_task(busy_mode_checker())
-    elif new_mode == Mode.SICK:
-        print("🤒 进入生病模式")
-        tg_state.mode_task = asyncio.create_task(sick_mode_checker())
-    elif new_mode == Mode.ANGRY:
-        print("😤 进入生气模式")
-        tg_state.mode_task = asyncio.create_task(angry_mode_checker())
-    elif new_mode == Mode.NORMAL:
-        print(f"✅ 退出{old_mode}模式，回到正常")
-        reset_silence_checker()
-
-
-# ============================================================
-# 消息缓冲
-# ============================================================
-
-async def process_buffered_messages():
-    await asyncio.sleep(4)
-
-    if not tg_state.message_buffer:
-        return
-
-    messages = tg_state.message_buffer.copy()
-    tg_state.message_buffer.clear()
-
-    # 分离文字和图片
-    text_parts = []
-    images = []
-    for m in messages:
-        if isinstance(m, dict) and m.get("type") == "image":
-            images.append(m)
-            if m.get("caption"):
-                text_parts.append(m["caption"])
-        else:
-            text_parts.append(m)
-
-    combined_text = "\n".join(text_parts) if text_parts else ("发了一张图片" if images else "")
-    print(f"📩 处理缓冲消息（文字{len(text_parts)}条，图片{len(images)}张）")
-
-    await detect_and_switch_mode(combined_text)
-
-    # 检测DDL信息（出错不影响正常聊天）
-    try:
-        await detect_and_save_ddl(combined_text)
-    except Exception as e:
-        print(f"⚠️  DDL检测出错（不影响聊天）: {e}")
-
-    reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages), raw_parts=text_parts)
-
-    parts = [l.strip() for l in reply.split("\n") if l.strip()]
-    if not parts:
-        parts = [reply]
-    parts = parts[:9]  # 最多9条
-
-    for i, part in enumerate(parts):
-        await send_telegram_message(part)
-        if i < len(parts) - 1:
-            await asyncio.sleep(1.2)
-
-
 async def detect_and_save_ddl(text: str):
-    """检测消息中的DDL信息，自动存入列表和iCloud"""
-    ddl_keywords = ["ddl", "due", "截止", "交作业", "作业", "提交", "deadline", "due date", "到期"]
+    """检测消息中的DDL，存入列表"""
+    ddl_keywords = ["ddl", "due", "截止", "交作业", "作业", "提交", "deadline", "帮我记", "记一下", "提醒我", "别忘了"]
     if not any(kw in text.lower() for kw in ddl_keywords):
         return
     result = await parse_ddl_from_message(text)
     if not result:
         return
-    # 存入内存列表
     ddl_list.append({"title": result["title"], "deadline": result["deadline"], "reminded": False})
-    print(f"📅 检测到DDL：{result['title']} @ {result['deadline'].strftime('%Y-%m-%d')}")
-    # 写入iCloud
-    success = await add_to_icloud_calendar(result["title"], result["deadline"])
-    # 通知用户已存好
-    deadline_str = result["deadline"].strftime("%m月%d日")
-    if success:
-        confirm = f"好，{result['title']}的DDL {deadline_str} 我已经帮你存进日历了，到时候提前一天提醒你。"
-    else:
-        confirm = f"好，{result['title']}的DDL {deadline_str} 我记下了，到时候提前一天提醒你。（日历写入失败了，不过我这边有记录）"
+    deadline_str = result["deadline"].strftime("%m月%d日 %H:%M")
+    confirm = f"好，{result['title']} 截止{deadline_str}，我记下了，提前一天提醒你。"
     await send_telegram_message(confirm)
+    print(f"📅 已记录DDL：{result['title']} @ {deadline_str}")
 
 
 async def detect_and_switch_mode(text: str):

@@ -82,6 +82,7 @@ class TelegramState:
         self.last_night_check_date = None
         self.message_buffer = []
         self.buffer_task = None
+        self.conversation_history = []  # 对话历史，最多保留40条
 
 tg_state = TelegramState()
 
@@ -182,11 +183,16 @@ def cancel_task(task):
 
 STYLE_HINT = """
 # 回复风格（非常重要）
-- 每次只发1~2句话，短而直接，像真人发消息
+- 像真人男友发消息，口语化，有温度，不要像机器人
 - 不要总结、不要分点、不要写作文
 - 平时少用动作描写（*动作*），只在她需要安慰时偶尔用
-- 用口语，有温度，不要像机器人
-- 如果要表达多个意思，可以换行，最多3行
+- 每条消息用换行分隔，系统会自动拆成多条发送
+- 回复长度根据情境灵活调整：
+  * 她只发了一两个字或表情：2~3句
+  * 普通闲聊撒娇：3~5句
+  * 她说了很多（超过100字）、聊正经事、或在诉苦倾诉：5~9句，认真回应每个点
+  * 亲密互动：可以多发几句，但每句要短
+- 多换行，让对话有节奏感，不要把所有内容堆在一句话里
 """
 
 
@@ -325,20 +331,25 @@ async def silence_checker():
 
     for i, ((min_d, max_d), trigger_type) in enumerate(zip(delays, trigger_types)):
         delay = random.randint(min_d, max_d)
+        print(f"⏳ 沉默检测第{i+1}次，将在{delay}分钟后触发")
         await asyncio.sleep(delay * 60)
 
         if tg_state.mode != Mode.NORMAL:
+            print(f"⏭️  沉默触发{i+1}跳过：当前模式={tg_state.mode}")
             return
         if not is_active_hours():
+            print(f"⏭️  沉默触发{i+1}跳过：非活跃时段")
             return
         if tg_state.last_message_time:
             elapsed = (get_local_now() - tg_state.last_message_time).total_seconds() / 60
-            if elapsed < sum(d[0] for d in delays[:i+1]) - 5:
+            print(f"⏱️  距上次消息已 {elapsed:.1f} 分钟")
+            if elapsed < min_d - 5:
+                print(f"⏭️  沉默触发{i+1}跳过：有新消息")
                 return
 
         msg = await generate_message(trigger_type)
         await send_telegram_message(msg)
-        print(f"📨 沉默触发第{i+1}次")
+        print(f"📨 沉默触发第{i+1}次发送完成")
 
 
 def reset_silence_checker():
@@ -428,7 +439,7 @@ def enter_mode(new_mode: str):
 # ============================================================
 
 async def process_buffered_messages():
-    await asyncio.sleep(4)  # 等4秒，看看还有没有消息
+    await asyncio.sleep(4)
 
     if not tg_state.message_buffer:
         return
@@ -436,22 +447,33 @@ async def process_buffered_messages():
     messages = tg_state.message_buffer.copy()
     tg_state.message_buffer.clear()
 
-    combined_text = "\n".join(messages)
-    print(f"📩 处理缓冲消息（{len(messages)}条）: {combined_text[:60]}")
+    # 分离文字和图片
+    text_parts = []
+    images = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("type") == "image":
+            images.append(m)
+            if m.get("caption"):
+                text_parts.append(m["caption"])
+        else:
+            text_parts.append(m)
+
+    combined_text = "\n".join(text_parts) if text_parts else ("发了一张图片" if images else "")
+    print(f"📩 处理缓冲消息（文字{len(text_parts)}条，图片{len(images)}张）")
 
     await detect_and_switch_mode(combined_text)
 
-    reply = await generate_telegram_reply(combined_text)
+    reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages))
 
     parts = [l.strip() for l in reply.split("\n") if l.strip()]
     if not parts:
         parts = [reply]
-    parts = parts[:3]  # 最多3条
+    parts = parts[:9]  # 最多9条
 
     for i, part in enumerate(parts):
         await send_telegram_message(part)
         if i < len(parts) - 1:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
 
 
 async def detect_and_switch_mode(text: str):
@@ -513,44 +535,125 @@ async def telegram_polling():
             await asyncio.sleep(5)
 
 
+async def download_image_as_base64(file_id: str) -> str | None:
+    """从Telegram下载图片并转成base64"""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # 获取文件路径
+            resp = await client.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+                params={"file_id": file_id}
+            )
+            file_path = resp.json()["result"]["file_path"]
+            # 下载图片
+            img_resp = await client.get(
+                f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+            )
+            import base64
+            return base64.b64encode(img_resp.content).decode("utf-8")
+    except Exception as e:
+        print(f"⚠️  图片下载失败: {e}")
+        return None
+
+
 async def handle_telegram_update(update: dict):
     message = update.get("message", {})
     text = message.get("text", "").strip()
+    caption = message.get("caption", "").strip()  # 图片附带的文字
     chat_id = str(message.get("chat", {}).get("id", ""))
+    photos = message.get("photo", [])
 
     if chat_id != TELEGRAM_CHAT_ID:
         return
-    if not text:
-        return
 
     tg_state.last_message_time = get_local_now()
-    tg_state.message_buffer.append(text)
+
+    # 处理图片
+    if photos:
+        # 取最高清的那张
+        best_photo = max(photos, key=lambda p: p.get("file_size", 0))
+        file_id = best_photo["file_id"]
+        b64 = await download_image_as_base64(file_id)
+        if b64:
+            # 存成特殊格式，后面处理时识别
+            tg_state.message_buffer.append({"type": "image", "data": b64, "caption": caption})
+            print(f"📷 收到图片，caption: {caption[:30] if caption else '无'}")
+        elif caption:
+            tg_state.message_buffer.append(caption)
+    elif text:
+        tg_state.message_buffer.append(text)
+    else:
+        return
 
     cancel_task(tg_state.buffer_task)
     tg_state.buffer_task = asyncio.create_task(process_buffered_messages())
 
 
-async def generate_telegram_reply(user_text: str) -> str:
+def is_serious_conversation(text: str, buffer_count: int) -> bool:
+    """判断是否是正经对话（字数多或消息多）"""
+    if len(text) > 150:
+        return True
+    if buffer_count >= 4:
+        return True
+    return False
+
+
+async def generate_telegram_reply(user_text: str, images: list = None, buffer_count: int = 1) -> str:
     if MEMORY_ENABLED:
         enhanced_prompt = await build_system_prompt_with_memories(user_text)
     else:
         enhanced_prompt = SYSTEM_PROMPT
 
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+    # 构建对话历史（最近20条）
+    history = tg_state.conversation_history[-20:] if tg_state.conversation_history else []
+
+    # 构建当前用户消息内容（支持图片）
+    if images:
+        user_content = []
+        for img in images:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img['data']}"}
+            })
+        caption = user_text if user_text and user_text != "发了一张图片" else "（我发了张图片给你看）"
+        user_content.append({"type": "text", "text": caption})
+    else:
+        user_content = user_text
+
+    # 根据内容调整风格提示
+    serious = is_serious_conversation(user_text, buffer_count)
+    if serious:
+        extra_hint = "\n\n【当前对话提示】她说了很多或者在聊正经的事，请认真回应每个点，回复长度5~9句。"
+    elif len(user_text) <= 5:
+        extra_hint = "\n\n【当前对话提示】她只发了很短的内容，2~3句回应就够。"
+    else:
+        extra_hint = "\n\n【当前对话提示】普通闲聊，3~5句自然回应。"
+
+    messages = [{"role": "system", "content": enhanced_prompt + "\n" + STYLE_HINT + extra_hint}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_content})
+
     body = {
         "model": DEFAULT_MODEL,
-        "messages": [
-            {"role": "system", "content": enhanced_prompt + "\n" + STYLE_HINT},
-            {"role": "user", "content": user_text}
-        ],
-        "max_tokens": 800,
+        "messages": messages,
+        "max_tokens": 2000,
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=90) as client:
         try:
             resp = await client.post(API_BASE_URL, headers=headers, json=body)
             data = resp.json()
             reply = data["choices"][0]["message"]["content"].strip()
+
+            # 保存到对话历史
+            tg_state.conversation_history.append({"role": "user", "content": user_text})
+            tg_state.conversation_history.append({"role": "assistant", "content": reply})
+            # 只保留最近40条
+            if len(tg_state.conversation_history) > 40:
+                tg_state.conversation_history = tg_state.conversation_history[-40:]
+
             session_id = str(uuid.uuid4())[:8]
             if MEMORY_ENABLED:
                 asyncio.create_task(

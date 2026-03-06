@@ -253,8 +253,10 @@ async def parse_ddl_from_message(text: str) -> dict | None:
         try:
             resp = await client.post(API_BASE_URL, headers=headers, json=body)
             raw = resp.json()["choices"][0]["message"]["content"].strip()
+            print(f"📅 DDL解析原始结果: {raw}")
             raw = re.sub(r"```json|```", "", raw).strip()
             data = json.loads(raw)
+            print(f"📅 DDL解析结果: title={data.get('title')}, deadline={data.get('deadline')}")
             if data.get("title") and data.get("deadline"):
                 deadline_dt = datetime.strptime(data["deadline"], "%Y-%m-%d %H:%M")
                 deadline_dt = deadline_dt.replace(tzinfo=timezone(timedelta(hours=TIMEZONE_HOURS)))

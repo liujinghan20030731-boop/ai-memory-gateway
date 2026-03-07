@@ -355,6 +355,7 @@ STYLE_HINT = """
 - 平时少用动作描写（*动作*），只在她需要安慰时偶尔用
 - 每条消息用换行分隔，系统会自动拆成多条发送
 - 回复长度根据情境灵活调整：
+  * 每次回复最多不超过250字，宁可意犹未尽，不要一口气说完
   * 她只发了一两个字或表情：2~3句
   * 普通闲聊撒娇：3~5句
   * 她说了很多（超过100字）、聊正经事、或在诉苦倾诉：5~9句，认真回应每个点
@@ -998,7 +999,7 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
     body = {
         "model": DEFAULT_MODEL,
         "messages": messages,
-        "max_tokens": 2000,
+        "max_tokens": 3000,
     }
 
     async with httpx.AsyncClient(timeout=90) as client:

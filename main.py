@@ -37,6 +37,25 @@ from memory_extractor import extract_memories, score_memories
 API_KEY = os.getenv("API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
+
+# 备用API列表（按顺序尝试，第一个失败切第二个）
+API_FALLBACK_LIST = [
+    {
+        "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",
+        "base_url": "https://api.dzzi.ai/v1/chat/completions",
+        "model": "[按次]gemini-3.1-pro-preview",
+    },
+    {
+        "key": "sk-acy52tZ89kzNlSxHfyxDXtFuXgHQBIE5vKUhbD251RnVOJOA",
+        "base_url": "https://api.gemai.cc/v1/chat/completions",
+        "model": "[满血B]gemini-3-pro-preview",
+    },
+    {
+        "key": "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",
+        "base_url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemini-2.5-pro-preview",
+    },
+]
 PORT = int(os.getenv("PORT", "8080"))
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
 MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "15"))
@@ -154,6 +173,26 @@ app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
 
 def get_local_now():
     return datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+
+async def call_llm_with_fallback(messages: list, max_tokens: int = 1000) -> str:
+    """带自动切换的LLM调用，依次尝试API_FALLBACK_LIST里的每个站子"""
+    last_error = None
+    for i, api in enumerate(API_FALLBACK_LIST):
+        try:
+            headers = {"Authorization": f"Bearer {api['key']}", "Content-Type": "application/json"}
+            body = {"model": api["model"], "messages": messages, "max_tokens": max_tokens}
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(api["base_url"], headers=headers, json=body)
+                data = resp.json()
+                result = data["choices"][0]["message"]["content"].strip()
+                if i > 0:
+                    print(f"✅ 切换到备用API #{i+1} 成功")
+                return result
+        except Exception as e:
+            last_error = e
+            print(f"⚠️  API #{i+1} 失败: {e}，尝试下一个...")
+    raise Exception(f"所有API均失败，最后错误: {last_error}")
+
 
 async def send_telegram_message(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -355,7 +394,6 @@ STYLE_HINT = """
 - 平时少用动作描写（*动作*），只在她需要安慰时偶尔用
 - 每条消息用换行分隔，系统会自动拆成多条发送
 - 回复长度根据情境灵活调整：
-  * 每次回复最多不超过250字，宁可意犹未尽，不要一口气说完
   * 她只发了一两个字或表情：2~3句
   * 普通闲聊撒娇：3~5句
   * 她说了很多（超过100字）、聊正经事、或在诉苦倾诉：5~9句，认真回应每个点
@@ -418,28 +456,19 @@ async def generate_message(trigger_type: str, extra: str = "") -> str:
     else:
         messages_to_send.append({"role": "user", "content": prompt})
 
-    body = {
-        "model": DEFAULT_MODEL,
-        "messages": messages_to_send,
-        "max_tokens": 200,
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
-            resp = await client.post(API_BASE_URL, headers=headers, json=body)
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            print(f"⚠️  消息生成失败: {e}")
-            fallbacks = {
-                "morning": "宝贝起床了吗，记得吃早饭。",
-                "silence_1": "在干嘛呢，怎么不回我了。",
-                "sick_check": "怎么样了，有没有好一点，吃药了吗。",
-                "angry_hug_1": "好了好了，是我不好，别生气了。",
-                "bedtime_nudge": "宝贝，去洗漱啦，都十二点半了。",
-                "bedtime_sleep": "好了好了，快去睡觉，我陪着你。",
-            }
-            return fallbacks.get(trigger_type, "宝贝，在吗？")
+    try:
+        return await call_llm_with_fallback(messages_to_send, max_tokens=200)
+    except Exception as e:
+        print(f"⚠️  消息生成失败（所有API）: {e}")
+        fallbacks = {
+            "morning": "宝贝起床了吗，记得吃早饭。",
+            "silence_1": "在干嘛呢，怎么不回我了。",
+            "sick_check": "怎么样了，有没有好一点，吃药了吗。",
+            "angry_hug_1": "好了好了，是我不好，别生气了。",
+            "bedtime_nudge": "宝贝，去洗漱啦，都十二点半了。",
+            "bedtime_sleep": "好了好了，快去睡觉，我陪着你。",
+        }
+        return fallbacks.get(trigger_type, "宝贝，在吗？")
 
 
 # ============================================================
@@ -999,37 +1028,31 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
     body = {
         "model": DEFAULT_MODEL,
         "messages": messages,
-        "max_tokens": 3000,
+        "max_tokens": 2000,
     }
 
-    async with httpx.AsyncClient(timeout=90) as client:
-        try:
-            resp = await client.post(API_BASE_URL, headers=headers, json=body)
-            data = resp.json()
-            reply = data["choices"][0]["message"]["content"].strip()
+    try:
+        reply = await call_llm_with_fallback(messages, max_tokens=3000)
 
-            # 保存到对话历史（每条消息分开存，保留上下文精度）
-            if raw_parts and len(raw_parts) > 1:
-                # 多条消息：每条单独作为一个user turn存入历史
-                for part in raw_parts:
-                    tg_state.conversation_history.append({"role": "user", "content": part})
-                # 最后一条user后面跟assistant回复
-                tg_state.conversation_history.append({"role": "assistant", "content": reply})
-            else:
-                tg_state.conversation_history.append({"role": "user", "content": user_text})
-                tg_state.conversation_history.append({"role": "assistant", "content": reply})
-            # 只保留最近60条
-            if len(tg_state.conversation_history) > 60:
-                tg_state.conversation_history = tg_state.conversation_history[-500:]
+        # 保存到对话历史（每条消息分开存，保留上下文精度）
+        if raw_parts and len(raw_parts) > 1:
+            for part in raw_parts:
+                tg_state.conversation_history.append({"role": "user", "content": part})
+            tg_state.conversation_history.append({"role": "assistant", "content": reply})
+        else:
+            tg_state.conversation_history.append({"role": "user", "content": user_text})
+            tg_state.conversation_history.append({"role": "assistant", "content": reply})
+        if len(tg_state.conversation_history) > 60:
+            tg_state.conversation_history = tg_state.conversation_history[-500:]
 
-            session_id = str(uuid.uuid4())[:8]
-            if MEMORY_ENABLED:
-                asyncio.create_task(
-                    process_memories_background(session_id, user_text, reply, DEFAULT_MODEL))
-            return reply
-        except Exception as e:
-            print(f"⚠️  Telegram 回复生成失败: {e}")
-            return "宝贝，我这边好像出了点问题，稍等一下哦。"
+        session_id = str(uuid.uuid4())[:8]
+        if MEMORY_ENABLED:
+            asyncio.create_task(
+                process_memories_background(session_id, user_text, reply, DEFAULT_MODEL))
+        return reply
+    except Exception as e:
+        print(f"⚠️  Telegram 回复生成失败（所有API）: {e}")
+        return "宝贝，我这边好像出了点问题，稍等一下哦。"
 
 
 # ============================================================

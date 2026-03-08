@@ -63,6 +63,10 @@ API_FALLBACK_LIST = [
     },
 ]
 PORT = int(os.getenv("PORT", "8080"))
+PUBLIC_URL = os.getenv("PUBLIC_URL", "")  # 你的Railway公开域名，如 https://xxx.up.railway.app
+
+# 内存存储生成的网页（key: 短id, value: html内容）
+webpage_store: dict = {}
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
 MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "15"))
 MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
@@ -863,6 +867,55 @@ async def special_dates_scheduler():
             print(f"⚠️  特殊节日调度器错误: {e}")
 
 
+
+# ============================================================
+# 网页生成功能
+# ============================================================
+
+async def generate_and_send_webpage(user_request: str):
+    """生成HTML网页并发送链接"""
+    import uuid
+
+    now = get_local_now()
+    time_str = now.strftime("%Y-%m-%d %H:%M")
+
+    system_prompt = """你是一个帮女友生成网页的男友。根据她的要求，生成一个完整的单文件HTML网页。
+要求：
+- 只输出完整的HTML代码，不要任何解释，不要markdown代码块标记
+- 网页要好看，有设计感，符合她的审美（偏温柔、精致、可爱或浪漫风格）
+- 包含完整的CSS样式（写在<style>标签里）
+- 如果有交互需求，包含JavaScript（写在<script>标签里）
+- 字符集用UTF-8
+- 直接输出<!DOCTYPE html>开头的完整HTML"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"现在是{time_str}，官塘的要求：{user_request}"}
+    ]
+
+    await send_telegram_message("好，等我一下，给你做~")
+
+    html_content = await call_llm_with_fallback(messages, max_tokens=6000)
+
+    # 清理可能的markdown包裹
+    html_content = html_content.strip()
+    if html_content.startswith("```"):
+        lines = html_content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        html_content = "\n".join(lines)
+
+    # 存储网页
+    page_id = str(uuid.uuid4())[:8]
+    webpage_store[page_id] = html_content
+
+    if PUBLIC_URL:
+        link = f"{PUBLIC_URL.rstrip('/')}/page/{page_id}"
+        await send_telegram_message(f"做好了，点这里看：{link}")
+    else:
+        await send_telegram_message("网页做好了，但没配置PUBLIC_URL，发不了链接。让官塘在Railway环境变量里加上PUBLIC_URL。")
+
+    print(f"🌐 网页已生成: {page_id}")
+
 # ============================================================
 # 模式切换 & 任务管理
 # ============================================================
@@ -1122,6 +1175,15 @@ async def process_buffered_messages():
         await detect_and_save_ddl(combined_text)
     except Exception as e:
         print(f"⚠️  DDL检测出错（不影响聊天）: {e}")
+
+    # 检测网页生成请求
+    webpage_keywords = ["做个网页", "做一个网页", "给我做网页", "生成网页", "写个网页", "写一个网页", "做个页面", "做一个页面"]
+    if any(kw in combined_text for kw in webpage_keywords):
+        try:
+            await generate_and_send_webpage(combined_text)
+            return
+        except Exception as e:
+            print(f"⚠️  网页生成出错: {e}")
 
     reply = await generate_telegram_reply(combined_text, images=images, buffer_count=len(messages), raw_parts=text_parts)
 
@@ -1657,6 +1719,15 @@ async def import_memories(request: Request):
         return {"status": "done", "imported": imported, "skipped": skipped, "total": total}
     except Exception as e:
         return {"error": str(e)}
+
+
+
+@app.get("/page/{page_id}", response_class=HTMLResponse)
+async def serve_webpage(page_id: str):
+    html = webpage_store.get(page_id)
+    if not html:
+        return HTMLResponse("<h1>页面不存在或已过期</h1>", status_code=404)
+    return HTMLResponse(html)
 
 
 # ============================================================

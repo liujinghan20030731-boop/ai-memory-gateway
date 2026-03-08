@@ -41,6 +41,11 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
 # 备用API列表（按顺序尝试，第一个失败切第二个）
 API_FALLBACK_LIST = [
     {
+        "key": "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",
+        "base_url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemini-2.5-pro-preview",
+    },
+    {
         "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",
         "base_url": "https://api.dzzi.ai/v1/chat/completions",
         "model": "[按次]gemini-3.1-pro-preview",
@@ -49,11 +54,6 @@ API_FALLBACK_LIST = [
         "key": "sk-acy52tZ89kzNlSxHfyxDXtFuXgHQBIE5vKUhbD251RnVOJOA",
         "base_url": "https://api.gemai.cc/v1/chat/completions",
         "model": "[满血B]gemini-3-pro-preview",
-    },
-    {
-        "key": "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",
-        "base_url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "google/gemini-2.5-pro-preview",
     },
 ]
 PORT = int(os.getenv("PORT", "8080"))
@@ -156,6 +156,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(ddl_reminder_scheduler())
         asyncio.create_task(bedtime_and_diary_scheduler())
         asyncio.create_task(weekly_report_scheduler())
+        asyncio.create_task(random_miss_you_scheduler())
     else:
         print("ℹ️  Telegram Bot 未配置")
 
@@ -429,6 +430,7 @@ async def generate_message(trigger_type: str, extra: str = "") -> str:
         "ddl_reminder": f"现在是{time_str}，女朋友明天有个DDL：{extra}。提醒她一下，关心她有没有做完，语气温柔不催促。1~2句，必须有实际说的话，动作描写只能作为补充。",
         "bedtime_nudge": f"现在是{time_str}，已经十二点半了，提醒女朋友去洗漱准备睡觉，温柔催促，带点撒娇。1~2句，必须有实际说的话，动作描写只能作为补充。",
         "bedtime_sleep": f"现在是{time_str}，已经凌晨一点了，催女朋友去睡觉，语气可以强硬一点点但还是温柔，表示自己会陪着她。1~2句，必须有实际说的话，动作描写只能作为补充。",
+        "miss_you": f"现在是{time_str}，你突然想起了女朋友，主动发一条消息。不是因为她没回你，只是单纯想她了，或者突然想到她，想和她分享什么。可以是想到了她，也可以是看到了什么想到她，或者心情好想逗她。1~2句，口语化，自然随意，像真人男友突然发来的消息，不要刻意，动作描写只能作为补充。",
     }
 
     prompt = prompts.get(trigger_type, prompts["silence_1"])
@@ -457,7 +459,7 @@ async def generate_message(trigger_type: str, extra: str = "") -> str:
         messages_to_send.append({"role": "user", "content": prompt})
 
     try:
-        return await call_llm_with_fallback(messages_to_send, max_tokens=400)
+        return await call_llm_with_fallback(messages_to_send, max_tokens=600)
     except Exception as e:
         print(f"⚠️  消息生成失败（所有API）: {e}")
         fallbacks = {
@@ -558,7 +560,7 @@ async def generate_and_send_diary():
             {"role": "system", "content": system_with_mem},
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 2000,
+        "max_tokens": 5000,
     }
 
     async with httpx.AsyncClient(timeout=90) as client:
@@ -663,7 +665,7 @@ async def generate_and_send_weekly_report():
             {"role": "system", "content": system_with_mem},
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 2000,
+        "max_tokens": 5000,
     }
 
     async with httpx.AsyncClient(timeout=90) as client:
@@ -682,6 +684,44 @@ async def generate_and_send_weekly_report():
         except Exception as e:
             print(f"⚠️  周报生成失败: {e}")
 
+
+
+# ============================================================
+# 随机"想你了"调度器
+# ============================================================
+
+async def random_miss_you_scheduler():
+    """随机在活跃时段、你没聊天的时候主动发一条想你了"""
+    while True:
+        try:
+            # 每隔30~90分钟检查一次
+            wait = random.randint(30, 90) * 60
+            await asyncio.sleep(wait)
+
+            now = get_local_now()
+
+            # 只在NORMAL模式触发
+            if tg_state.mode != Mode.NORMAL:
+                continue
+
+            # 只在活跃时段触发
+            if not is_active_hours():
+                continue
+
+            # 距离上次消息超过45分钟才触发
+            if tg_state.last_message_time:
+                elapsed = (now - tg_state.last_message_time).total_seconds() / 60
+                if elapsed < 45:
+                    continue
+
+            msg = await generate_message("miss_you")
+            await send_telegram_message(msg)
+            tg_state.last_message_time = now
+            reset_silence_checker()
+            print(f"💭 随机想你了触发")
+
+        except Exception as e:
+            print(f"⚠️  随机想你了调度器错误: {e}")
 
 # ============================================================
 # 模式切换 & 任务管理

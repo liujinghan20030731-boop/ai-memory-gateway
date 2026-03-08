@@ -208,7 +208,7 @@ async def send_telegram_message(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+            await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"})
         except Exception as e:
             print(f"⚠️  Telegram 发送失败: {e}")
 

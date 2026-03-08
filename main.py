@@ -241,7 +241,7 @@ async def morning_greeting_scheduler():
             if weekday in [1, 3]:
                 target_hour, target_minute = 8, 20
             else:
-                target_hour, target_minute = 11, 0
+                target_hour, target_minute = 9, 0
 
             if hour == target_hour and minute == target_minute and tg_state.last_morning_date != today:
                 tg_state.last_morning_date = today

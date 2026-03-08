@@ -39,7 +39,13 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/comp
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
 
 # 备用API列表（按顺序尝试，第一个失败切第二个）
+# 第一个优先用环境变量里的官方API，后面是备用站子
 API_FALLBACK_LIST = [
+    {
+        "key": API_KEY,
+        "base_url": API_BASE_URL,
+        "model": DEFAULT_MODEL,
+    },
     {
         "key": "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",
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -182,7 +188,7 @@ async def call_llm_with_fallback(messages: list, max_tokens: int = 1000) -> str:
         try:
             headers = {"Authorization": f"Bearer {api['key']}", "Content-Type": "application/json"}
             body = {"model": api["model"], "messages": messages, "max_tokens": max_tokens}
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=25) as client:
                 resp = await client.post(api["base_url"], headers=headers, json=body)
                 data = resp.json()
                 result = data["choices"][0]["message"]["content"].strip()
@@ -257,7 +263,11 @@ async def morning_greeting_scheduler():
                         print("⏭️  早安跳过：7点后早安前已聊过天，用户已醒")
                         continue
                 msg = await generate_message("morning")
-                await send_telegram_message(msg)
+                parts = [p.strip() for p in msg.split("\n") if p.strip()]
+                for i, part in enumerate(parts):
+                    await send_telegram_message(part)
+                    if i < len(parts) - 1:
+                        await asyncio.sleep(1.2)
                 print(f"📨 早安: {msg[:30]}")
                 tg_state.last_message_time = now
                 reset_silence_checker()
@@ -517,19 +527,34 @@ async def bedtime_and_diary_scheduler():
 
 
 async def generate_and_send_diary():
-    """根据今天的对话历史生成日记"""
+    """根据今天的记忆数据库内容生成日记"""
     now = get_local_now()
     date_str = now.strftime("%Y年%m月%d日")
 
-    if not tg_state.conversation_history:
-        return
-
-    # 把对话历史整理成文字
+    # 从数据库取最近24小时的记忆
     history_text = ""
-    for msg in tg_state.conversation_history[-100:]:
-        role = "官塘" if msg["role"] == "user" else "我"
-        if isinstance(msg["content"], str):
-            history_text += f"{role}：{msg['content']}\n"
+    if MEMORY_ENABLED:
+        try:
+            from database import get_pool
+            pool = await get_pool()
+            cutoff = now - timedelta(hours=24)
+            cutoff_utc = cutoff.astimezone(timezone.utc)
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT content FROM memories WHERE created_at >= $1 ORDER BY created_at ASC",
+                    cutoff_utc
+                )
+            for row in rows:
+                history_text += f"{row['content']}\n"
+        except Exception as e:
+            print(f"⚠️  日记从数据库取记忆失败，回退到对话历史: {e}")
+
+    # 回退：如果数据库没内容，用内存对话历史
+    if not history_text.strip():
+        for msg in tg_state.conversation_history[-100:]:
+            role = "官塘" if msg["role"] == "user" else "我"
+            if isinstance(msg["content"], str):
+                history_text += f"{role}：{msg['content']}\n"
 
     if not history_text.strip():
         return
@@ -624,16 +649,30 @@ async def generate_and_send_weekly_report():
     sunday = monday + timedelta(days=6)
     date_range = f"{monday.strftime('%m月%d日')}～{sunday.strftime('%m月%d日')}"
 
-    history_source = weekly_conversation_log if weekly_conversation_log else tg_state.conversation_history[-200:]
-
-    if not history_source:
-        return
-
+    # 从数据库取最近7天的记忆
     history_text = ""
-    for msg in history_source:
-        role = "官塘" if msg["role"] == "user" else "我"
-        if isinstance(msg["content"], str):
-            history_text += f"{role}：{msg['content']}\n"
+    if MEMORY_ENABLED:
+        try:
+            from database import get_pool
+            pool = await get_pool()
+            cutoff = (now - timedelta(days=7)).astimezone(timezone.utc)
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT content FROM memories WHERE created_at >= $1 ORDER BY created_at ASC",
+                    cutoff
+                )
+            for row in rows:
+                history_text += f"{row['content']}\n"
+        except Exception as e:
+            print(f"⚠️  周报从数据库取记忆失败，回退到对话历史: {e}")
+
+    # 回退：用内存历史
+    if not history_text.strip():
+        history_source = weekly_conversation_log if weekly_conversation_log else tg_state.conversation_history[-200:]
+        for msg in history_source:
+            role = "官塘" if msg["role"] == "user" else "我"
+            if isinstance(msg["content"], str):
+                history_text += f"{role}：{msg['content']}\n"
 
     if not history_text.strip():
         return
@@ -950,7 +989,7 @@ async def handle_telegram_update(update: dict):
 
 async def process_buffered_messages():
     """等待4秒缓冲，然后统一处理所有消息"""
-    await asyncio.sleep(8)
+    await asyncio.sleep(6)
 
     messages = list(tg_state.message_buffer)
     tg_state.message_buffer.clear()

@@ -479,7 +479,7 @@ async def generate_message(trigger_type: str, extra: str = "") -> str:
         messages_to_send.append({"role": "user", "content": prompt})
 
     try:
-        return await call_llm_with_fallback(messages_to_send, max_tokens=600)
+        return await call_llm_with_fallback(messages_to_send, max_tokens=1000)
     except Exception as e:
         print(f"⚠️  消息生成失败（所有API）: {e}")
         fallbacks = {

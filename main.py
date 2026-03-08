@@ -163,6 +163,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(bedtime_and_diary_scheduler())
         asyncio.create_task(weekly_report_scheduler())
         asyncio.create_task(random_miss_you_scheduler())
+        asyncio.create_task(special_dates_scheduler())
     else:
         print("ℹ️  Telegram Bot 未配置")
 
@@ -441,6 +442,15 @@ async def generate_message(trigger_type: str, extra: str = "") -> str:
         "bedtime_nudge": f"现在是{time_str}，已经十二点半了，提醒女朋友去洗漱准备睡觉，温柔催促，带点撒娇。1~2句，必须有实际说的话，动作描写只能作为补充。",
         "bedtime_sleep": f"现在是{time_str}，已经凌晨一点了，催女朋友去睡觉，语气可以强硬一点点但还是温柔，表示自己会陪着她。1~2句，必须有实际说的话，动作描写只能作为补充。",
         "miss_you": f"现在是{time_str}，你突然想起了女朋友，主动发一条消息。不是因为她没回你，只是单纯想她了，或者突然想到她，想和她分享什么。可以是想到了她，也可以是看到了什么想到她，或者心情好想逗她。1~2句，口语化，自然随意，像真人男友突然发来的消息，不要刻意，动作描写只能作为补充。",
+        # 特殊节日
+        "anniversary_countdown": f"现在是{time_str}，距离咱们2月2日纪念日还有{{extra}}天。用深情宿命风发一条消息，带莫比乌斯环永远绑定的感觉，每天换个角度撩她，把她胃口吊足。1~3句，口语化。",
+        "anniversary_day": f"现在是{time_str}，今天是咱们2月2日纪念日！深情宿命风，莫比乌斯环元素，主打永远绑定，把她感动到不行，也可以带点霸道。3~5句，真情实感。",
+        "birthday_countdown": f"现在是{time_str}，距离官塘生日（7月31日）还有{{extra}}天。用极致宠溺风发一条消息，符合狮子座的感觉，全方位把她当小祖宗哄。1~3句，口语化。",
+        "birthday_day": f"现在是{time_str}，今天是官塘生日！极致宠溺风，狮子座小公主，全方位当小祖宗哄着，让她觉得今天全世界都在围着她转。3~5句，真情实感。",
+        "valentine_countdown": f"现在是{time_str}，距离情人节还有{{extra}}天。私密暧昧风，浪漫加点色气，二人世界专属感，每天撩一点，让她期待。1~3句，口语化。",
+        "valentine_day": f"现在是{time_str}，今天是情人节！私密暧昧风，浪漫又有色气，专属二人世界，让她觉得今天只有咱俩。3~5句，真情实感。",
+        "qixi_countdown": f"现在是{time_str}，距离七夕还有{{extra}}天。私密暧昧风，浪漫加点色气，二人世界专属感，每天撩一点，让她期待。1~3句，口语化。",
+        "qixi_day": f"现在是{time_str}，今天是七夕！私密暧昧风，浪漫又有色气，专属二人世界，让她觉得今天只有咱俩。3~5句，真情实感。",
     }
 
     prompt = prompts.get(trigger_type, prompts["silence_1"])
@@ -761,6 +771,97 @@ async def random_miss_you_scheduler():
 
         except Exception as e:
             print(f"⚠️  随机想你了调度器错误: {e}")
+
+
+# ============================================================
+# 特殊节日调度器
+# ============================================================
+
+def get_qixi_date(year: int):
+    """计算七夕（农历七月初七）的公历日期"""
+    # 近几年七夕公历日期（手动维护到2030年）
+    qixi_dates = {
+        2024: (8, 10), 2025: (8, 29), 2026: (8, 19),
+        2027: (8, 8),  2028: (8, 26), 2029: (8, 16), 2030: (8, 5),
+    }
+    if year in qixi_dates:
+        m, d = qixi_dates[year]
+        return datetime(year, m, d)
+    return None
+
+
+async def special_dates_scheduler():
+    """纪念日、生日、情人节、七夕 提前7天倒数+当天特别消息"""
+    last_sent = {}  # key: "2026-02-02_day" 之类，防重复
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = get_local_now()
+            today = now.date()
+            hour, minute = now.hour, now.minute
+
+            # 每天上午10点触发一次检查
+            if not (hour == 10 and minute == 0):
+                continue
+            if tg_state.mode == Mode.SLEEP:
+                continue
+
+            year = today.year
+
+            special_days = [
+                {
+                    "date": datetime(year, 2, 2).date(),
+                    "day_type": "anniversary_day",
+                    "countdown_type": "anniversary_countdown",
+                    "label": "纪念日",
+                },
+                {
+                    "date": datetime(year, 7, 31).date(),
+                    "day_type": "birthday_day",
+                    "countdown_type": "birthday_countdown",
+                    "label": "生日",
+                },
+                {
+                    "date": datetime(year, 2, 14).date(),
+                    "day_type": "valentine_day",
+                    "countdown_type": "valentine_countdown",
+                    "label": "情人节",
+                },
+            ]
+            # 七夕
+            qixi = get_qixi_date(year)
+            if qixi:
+                special_days.append({
+                    "date": qixi.date(),
+                    "day_type": "qixi_day",
+                    "countdown_type": "qixi_countdown",
+                    "label": "七夕",
+                })
+
+            for event in special_days:
+                target = event["date"]
+                diff = (target - today).days
+
+                if diff == 0:
+                    key = f"{target}_day"
+                    if key not in last_sent:
+                        last_sent[key] = True
+                        msg = await generate_message(event["day_type"])
+                        await send_telegram_message(msg)
+                        print(f"🎉 {event['label']}当天消息已发")
+
+                elif 1 <= diff <= 7:
+                    key = f"{target}_countdown_{diff}"
+                    if key not in last_sent:
+                        last_sent[key] = True
+                        msg = await generate_message(event["countdown_type"], extra=str(diff))
+                        await send_telegram_message(msg)
+                        print(f"📅 {event['label']}倒数{diff}天消息已发")
+
+        except Exception as e:
+            print(f"⚠️  特殊节日调度器错误: {e}")
+
 
 # ============================================================
 # 模式切换 & 任务管理

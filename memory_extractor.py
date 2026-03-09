@@ -19,6 +19,48 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/comp
 MEMORY_MODEL = os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4")
 
 
+
+def robust_json_parse(text: str):
+    """尽力解析可能不规范的JSON，解析失败返回None"""
+    text = text.strip()
+    # 去掉markdown
+    for prefix in ["```json", "```"]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
+    # 直接解析
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    # 找第一个[到最后一个]
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end+1])
+        except:
+            pass
+
+    # 逐条提取content和importance
+    import re
+    items = []
+    pattern = r'\"content\"\s*:\s*\"((?:[^\"\\\]|\\.)*)\"\s*,\s*\"importance\"\s*:\s*(\d+)'
+    for m in re.finditer(pattern, text):
+        items.append({"content": m.group(1), "importance": int(m.group(2))})
+    if items:
+        return items
+
+    # 空数组
+    if "[]" in text:
+        return []
+
+    return None
+
 EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提取值得长期记住的关键信息。
 
 # 提取重点
@@ -145,7 +187,10 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
             text = text.strip()
 
             # 解析 JSON
-            memories = json.loads(text)
+            memories = robust_json_parse(text)
+            if memories is None:
+                print(f"⚠️  记忆提取结果解析失败，原始内容: {text[:100]}")
+                return []
 
             if not isinstance(memories, list):
                 return []
@@ -230,9 +275,8 @@ async def score_memories(texts: List[str]) -> List[Dict]:
                 text = text[:-3]
             text = text.strip()
 
-            memories = json.loads(text)
-
-            if not isinstance(memories, list):
+            memories = robust_json_parse(text)
+            if memories is None or not isinstance(memories, list):
                 return [{"content": t, "importance": 5} for t in texts]
 
             valid = []

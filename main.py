@@ -188,9 +188,14 @@ async def call_llm_with_fallback(messages: list, max_tokens: int = 1000) -> str:
         try:
             headers = {"Authorization": f"Bearer {api['key']}", "Content-Type": "application/json"}
             body = {"model": api["model"], "messages": messages, "max_tokens": max_tokens}
-            async with httpx.AsyncClient(timeout=25) as client:
+            async with httpx.AsyncClient(timeout=45) as client:
                 resp = await client.post(api["base_url"], headers=headers, json=body)
                 data = resp.json()
+                if "choices" not in data:
+                    err_msg = data.get("error", {})
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message", str(data))
+                    raise Exception(f"API返回错误: {err_msg}")
                 result = data["choices"][0]["message"]["content"].strip()
                 if i > 0:
                     print(f"✅ 切换到备用API #{i+1} 成功")

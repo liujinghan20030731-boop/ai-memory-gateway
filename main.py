@@ -753,8 +753,8 @@ async def random_miss_you_scheduler():
 
             now = get_local_now()
 
-            # 只在NORMAL模式触发
-            if tg_state.mode != Mode.NORMAL:
+            # SLEEP模式不触发，其他模式都可以
+            if tg_state.mode == Mode.SLEEP:
                 continue
 
             # 只在活跃时段触发

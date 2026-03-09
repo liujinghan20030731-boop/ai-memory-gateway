@@ -58,6 +58,8 @@ API_FALLBACK_LIST = [
     },
 ]
 PORT = int(os.getenv("PORT", "8080"))
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+NOTION_DIARY_DB_ID = os.getenv("NOTION_DIARY_DB_ID", "")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")  # 你的Railway公开域名，如 https://xxx.up.railway.app
 
 # 内存存储生成的网页（key: 短id, value: html内容）
@@ -606,16 +608,72 @@ async def generate_and_send_diary():
         try:
             resp = await client.post(API_BASE_URL, headers=headers, json=body)
             diary = resp.json()["choices"][0]["message"]["content"].strip()
-            # 日记分段发送
-            parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
-            for i, part in enumerate(parts):
-                await send_telegram_message(part)
-                if i < len(parts) - 1:
-                    await asyncio.sleep(1.5)
-            print(f"📔 日记发送完成，共{len(parts)}段")
+            # 写入Notion，不再发Telegram
+            notion_ok = await write_diary_to_notion(date_str, diary)
+            if not notion_ok:
+                # Notion失败才发Telegram兜底
+                parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
+                for i, part in enumerate(parts):
+                    await send_telegram_message(part)
+                    if i < len(parts) - 1:
+                        await asyncio.sleep(1.5)
+                print(f"📔 Notion写入失败，日记已发送到Telegram，共{len(parts)}段")
+            else:
+                print(f"📔 日记已写入Notion")
         except Exception as e:
             print(f"⚠️  日记生成失败: {e}")
 
+
+
+async def write_diary_to_notion(date_str: str, diary_content: str):
+    """把日记写入Notion数据库"""
+    if not NOTION_TOKEN or not NOTION_DIARY_DB_ID:
+        return False
+    try:
+        # 把日记内容按段落拆成blocks
+        paragraphs = [p.strip() for p in diary_content.split("\n\n") if p.strip()]
+        blocks = []
+        for para in paragraphs:
+            # 每段再按换行拆
+            lines = [l.strip() for l in para.split("\n") if l.strip()]
+            for line in lines:
+                blocks.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": line}}]
+                    }
+                })
+
+        payload = {
+            "parent": {"database_id": NOTION_DIARY_DB_ID},
+            "properties": {
+                "标题": {
+                    "title": [{"type": "text", "text": {"content": f"老公的日记 · {date_str}"}}]
+                }
+            },
+            "children": blocks[:100]  # Notion单次最多100个block
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.notion.com/v1/pages",
+                headers={
+                    "Authorization": f"Bearer {NOTION_TOKEN}",
+                    "Content-Type": "application/json",
+                    "Notion-Version": "2022-06-28"
+                },
+                json=payload
+            )
+            if resp.status_code == 200:
+                print(f"📓 日记已写入Notion")
+                return True
+            else:
+                print(f"⚠️  Notion写入失败: {resp.status_code} {resp.text[:100]}")
+                return False
+    except Exception as e:
+        print(f"⚠️  Notion写入出错: {e}")
+        return False
 
 # ============================================================
 # 周报调度器

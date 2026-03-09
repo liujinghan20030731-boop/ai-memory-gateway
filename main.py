@@ -1187,7 +1187,7 @@ async def process_buffered_messages():
 
     # 分段发送
     parts = [p.strip() for p in reply.split("\n") if p.strip()]
-    max_parts = 9
+    max_parts = 20
 
     # 存入对话历史（每条消息单独存）
     for part in text_parts:

@@ -188,7 +188,7 @@ async def call_llm_with_fallback(messages: list, max_tokens: int = 1000) -> str:
         try:
             headers = {"Authorization": f"Bearer {api['key']}", "Content-Type": "application/json"}
             body = {"model": api["model"], "messages": messages, "max_tokens": max_tokens}
-            async with httpx.AsyncClient(timeout=45) as client:
+            async with httpx.AsyncClient(timeout=90) as client:
                 resp = await client.post(api["base_url"], headers=headers, json=body)
                 data = resp.json()
                 if "choices" not in data:

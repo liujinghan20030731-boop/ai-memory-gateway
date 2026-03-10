@@ -1354,24 +1354,51 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         if not memories:
             return SYSTEM_PROMPT
 
-        memory_lines = []
-        for mem in memories:
-            date_str = ""
+        def format_memories(mems):
+            lines = []
+            for mem in mems:
+                date_str = ""
+                if mem.get("created_at"):
+                    try:
+                        utc_str = str(mem['created_at'])[:19]
+                        utc_dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        local_dt = utc_dt + timedelta(hours=TIMEZONE_HOURS)
+                        date_str = f"[{local_dt.strftime('%Y-%m-%d')}] "
+                    except:
+                        date_str = f"[{str(mem['created_at'])[:10]}] "
+                lines.append(f"- {date_str}{mem['content']}")
+            return lines
+
+        # 关键词匹配记忆
+        memory_lines = format_memories(memories)
+
+        # 最近3天记忆（兜底，防止重启后失忆）
+        recent_all = await get_recent_memories(limit=30)
+        three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+        recent_lines = []
+        keyword_ids = {id(m) for m in memories}
+        for mem in recent_all:
             if mem.get("created_at"):
                 try:
                     utc_str = str(mem['created_at'])[:19]
                     utc_dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                    local_dt = utc_dt + timedelta(hours=TIMEZONE_HOURS)
-                    date_str = f"[{local_dt.strftime('%Y-%m-%d')}] "
+                    if utc_dt >= three_days_ago and mem['content'] not in [m['content'] for m in memories]:
+                        recent_lines.append(f"- [{utc_dt.strftime('%Y-%m-%d')}] {mem['content']}")
                 except:
-                    date_str = f"[{str(mem['created_at'])[:10]}] "
-            memory_lines.append(f"- {date_str}{mem['content']}")
+                    pass
+
+        recent_block = ""
+        if recent_lines:
+            recent_block = f"""
+【最近3天的记忆（始终保留）】
+{chr(10).join(recent_lines)}
+"""
 
         enhanced_prompt = f"""{SYSTEM_PROMPT}
 
 【从过往对话中检索到的相关记忆】
 {chr(10).join(memory_lines)}
-
+{recent_block}
 # 记忆应用
 - 像朋友般自然运用这些记忆，不刻意展示
 - 仅在相关话题出现时引用
@@ -1379,7 +1406,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
 - 自然引用："记得你说过..."或"上次我们聊到..."
 - 避免机械式表达如"根据我的记忆..."
 """
-        print(f"📚 注入了 {len(memories)} 条相关记忆")
+        print(f"📚 注入了 {len(memories)} 条相关记忆 + {len(recent_lines)} 条近期记忆")
         return enhanced_prompt
     except Exception as e:
         print(f"⚠️  记忆检索失败: {e}")

@@ -67,7 +67,7 @@ webpage_store: dict = {}
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
 MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "15"))
 MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
-TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "-5"))  # 美东 EST
+TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "-4"))  # 美东 EDT（夏令时）
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -516,21 +516,7 @@ async def bedtime_and_diary_scheduler():
             today = now.date()
             hour, minute = now.hour, now.minute
 
-            # 凌晨12:30 催去洗漱
-            if hour == 0 and minute == 30 and nudge_sent_date != today:
-                if tg_state.mode not in [Mode.SLEEP]:
-                    nudge_sent_date = today
-                    msg = await generate_message("bedtime_nudge")
-                    await send_telegram_message(msg)
-                    print("🌙 催睡第一次：12:30")
-
-            # 凌晨1:00 催去睡觉
-            if hour == 1 and minute == 0 and sleep_sent_date != today:
-                if tg_state.mode not in [Mode.SLEEP]:
-                    sleep_sent_date = today
-                    msg = await generate_message("bedtime_sleep")
-                    await send_telegram_message(msg)
-                    print("🌙 催睡第二次：1:00")
+            # 催睡功能已关闭
 
             # 凌晨5:00 写日记
             if hour == 5 and minute == 0 and diary_sent_date != today:
@@ -823,7 +809,7 @@ async def random_miss_you_scheduler():
             # 距离上次消息超过45分钟才触发
             if tg_state.last_message_time:
                 elapsed = (now - tg_state.last_message_time).total_seconds() / 60
-                if elapsed < 45:
+                if elapsed < 60:
                     continue
 
             msg = await generate_message("miss_you")

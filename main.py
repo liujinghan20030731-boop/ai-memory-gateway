@@ -44,7 +44,7 @@ API_FALLBACK_LIST = [
     {
         "key": "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",
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "google/gemini-2.5-pro-preview",
+        "model": "google/gemini-3.1-pro-preview",
     },
     {
         "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",

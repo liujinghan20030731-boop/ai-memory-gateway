@@ -49,7 +49,7 @@ def robust_json_parse(text: str):
     # 逐条提取content和importance
     import re
     items = []
-    pattern = r'\"content\"\s*:\s*\"((?:[^\"\\\]|\\.)*)\"\s*,\s*\"importance\"\s*:\s*(\d+)'
+    pattern = r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"importance"\s*:\s*(\d+)'
     for m in re.finditer(pattern, text):
         items.append({"content": m.group(1), "importance": int(m.group(2))})
     if items:

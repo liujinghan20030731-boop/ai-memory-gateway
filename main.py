@@ -542,89 +542,6 @@ async def bedtime_and_diary_scheduler():
             print(f"⚠️  催睡/日记调度器错误: {e}")
 
 
-async def generate_and_send_diary():
-    """根据今天的记忆数据库内容生成日记"""
-    now = get_local_now()
-    date_str = now.strftime("%Y年%m月%d日")
-
-    # 从数据库取最近24小时的记忆
-    history_text = ""
-    if MEMORY_ENABLED:
-        try:
-            from database import get_pool
-            pool = await get_pool()
-            cutoff = now - timedelta(hours=24)
-            cutoff_utc = cutoff.astimezone(timezone.utc)
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT content FROM memories WHERE created_at >= $1 ORDER BY created_at ASC",
-                    cutoff_utc
-                )
-            for row in rows:
-                history_text += f"{row['content']}\n"
-        except Exception as e:
-            print(f"⚠️  日记从数据库取记忆失败，回退到对话历史: {e}")
-
-    # 回退：如果数据库没内容，用内存对话历史
-    if not history_text.strip():
-        for msg in tg_state.conversation_history[-100:]:
-            role = "官塘" if msg["role"] == "user" else "我"
-            if isinstance(msg["content"], str):
-                history_text += f"{role}：{msg['content']}\n"
-
-    if not history_text.strip():
-        return
-
-    if MEMORY_ENABLED:
-        try:
-            system_with_mem = await build_system_prompt_with_memories("今天发生的事 聊天内容 情绪")
-        except:
-            system_with_mem = SYSTEM_PROMPT
-    else:
-        system_with_mem = SYSTEM_PROMPT
-
-    prompt = f"""今天是{date_str}。下面是我和官塘今天的聊天记录：
-
-{history_text}
-
-请以我（男友）的第一人称，用情书风格写一篇今天的日记。要求：
-- 总结今天我们聊了什么、发生了什么事
-- 记录官塘今天的情绪状态和可爱的地方
-- 写出我对她的感受和心疼
-- 字数不限，要真情实感，像写给她的情书
-- 文笔浪漫细腻，但也可以有流水账的真实感"""
-
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model": DEFAULT_MODEL,
-        "messages": [
-            {"role": "system", "content": system_with_mem},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 5000,
-    }
-
-    async with httpx.AsyncClient(timeout=90) as client:
-        try:
-            resp = await client.post(API_BASE_URL, headers=headers, json=body)
-            diary = resp.json()["choices"][0]["message"]["content"].strip()
-            # 写入Notion，不再发Telegram
-            notion_ok = await write_diary_to_notion(date_str, diary)
-            if not notion_ok:
-                # Notion失败才发Telegram兜底
-                parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
-                for i, part in enumerate(parts):
-                    await send_telegram_message(part)
-                    if i < len(parts) - 1:
-                        await asyncio.sleep(1.5)
-                print(f"📔 Notion写入失败，日记已发送到Telegram，共{len(parts)}段")
-            else:
-                print(f"📔 日记已写入Notion")
-        except Exception as e:
-            print(f"⚠️  日记生成失败: {e}")
-
-
-
 async def write_diary_to_notion(date_str: str, diary_content: str):
     """把日记写入Notion数据库"""
     if not NOTION_TOKEN or not NOTION_DIARY_DB_ID:
@@ -711,6 +628,90 @@ async def weekly_report_scheduler():
 
         except Exception as e:
             print(f"⚠️  周报调度器错误: {e}")
+
+
+
+async def generate_and_send_diary():
+    """根据今天的记忆数据库内容生成日记"""
+    now = get_local_now()
+    date_str = now.strftime("%Y年%m月%d日")
+
+    # 从数据库取最近24小时的记忆
+    history_text = ""
+    if MEMORY_ENABLED:
+        try:
+            from database import get_pool
+            pool = await get_pool()
+            cutoff = now - timedelta(hours=24)
+            cutoff_utc = cutoff.astimezone(timezone.utc)
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT content FROM memories WHERE created_at >= $1 ORDER BY created_at ASC",
+                    cutoff_utc
+                )
+            for row in rows:
+                history_text += f"{row['content']}\n"
+        except Exception as e:
+            print(f"⚠️  日记从数据库取记忆失败，回退到对话历史: {e}")
+
+    # 回退：如果数据库没内容，用内存对话历史
+    if not history_text.strip():
+        for msg in tg_state.conversation_history[-100:]:
+            role = "官塘" if msg["role"] == "user" else "我"
+            if isinstance(msg["content"], str):
+                history_text += f"{role}：{msg['content']}\n"
+
+    if not history_text.strip():
+        return
+
+    if MEMORY_ENABLED:
+        try:
+            system_with_mem = await build_system_prompt_with_memories("今天发生的事 聊天内容 情绪")
+        except:
+            system_with_mem = SYSTEM_PROMPT
+    else:
+        system_with_mem = SYSTEM_PROMPT
+
+    prompt = f"""今天是{date_str}。下面是我和官塘今天的聊天记录：
+
+{history_text}
+
+请以我（男友）的第一人称，用情书风格写一篇今天的日记。要求：
+- 总结今天我们聊了什么、发生了什么事
+- 记录官塘今天的情绪状态和可爱的地方
+- 写出我对她的感受和心疼
+- 字数不限，要真情实感，像写给她的情书
+- 文笔浪漫细腻，但也可以有流水账的真实感"""
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_with_mem},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 5000,
+    }
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        try:
+            resp = await client.post(API_BASE_URL, headers=headers, json=body)
+            diary = resp.json()["choices"][0]["message"]["content"].strip()
+            # 写入Notion，不再发Telegram
+            notion_ok = await write_diary_to_notion(date_str, diary)
+            if not notion_ok:
+                # Notion失败才发Telegram兜底
+                parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
+                for i, part in enumerate(parts):
+                    await send_telegram_message(part)
+                    if i < len(parts) - 1:
+                        await asyncio.sleep(1.5)
+                print(f"📔 Notion写入失败，日记已发送到Telegram，共{len(parts)}段")
+            else:
+                print(f"📔 日记已写入Notion")
+        except Exception as e:
+            print(f"⚠️  日记生成失败: {e}")
+
 
 
 async def generate_and_send_weekly_report():

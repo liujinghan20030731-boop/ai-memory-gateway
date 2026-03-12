@@ -45,7 +45,7 @@ API_FALLBACK_LIST = [
     {
         "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",
         "base_url": "https://api.dzzi.ai/v1/chat/completions",
-        "model": "[按次]gemini-3.1-pro-preview",
+        "model": "[按次]gemini-3.1-pro-preview-128",
     },
     {
         "key": "sk-acy52tZ89kzNlSxHfyxDXtFuXgHQBIE5vKUhbD251RnVOJOA",

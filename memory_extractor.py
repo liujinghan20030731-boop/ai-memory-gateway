@@ -37,12 +37,24 @@ def robust_json_parse(text: str):
     except:
         pass
 
+    # 把裸换行符替换掉再试（模型有时在string里插入真实换行）
+    cleaned = text.replace('\r\n', '\\n').replace('\r', '\\n')
+    # 只替换JSON字符串内的换行（不破坏结构）
+    import re as _re
+    cleaned = _re.sub(r'(?<!\\)\n', '\\n', cleaned)
+    try:
+        return json.loads(cleaned)
+    except:
+        pass
+
     # 找第一个[到最后一个]
     start = text.find("[")
     end = text.rfind("]")
     if start != -1 and end != -1 and end > start:
         try:
-            return json.loads(text[start:end+1])
+            chunk = text[start:end+1]
+            chunk = _re.sub(r'(?<!\\)\n', '\\n', chunk)
+            return json.loads(chunk)
         except:
             pass
 

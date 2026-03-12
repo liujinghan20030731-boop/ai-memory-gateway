@@ -547,7 +547,7 @@ async def write_diary_to_notion(date_str: str, diary_content: str):
         payload = {
             "parent": {"database_id": NOTION_DIARY_DB_ID},
             "properties": {
-                "标题": {
+                "名称": {
                     "title": [{"type": "text", "text": {"content": f"老公的日记 · {date_str}"}}]
                 }
             },

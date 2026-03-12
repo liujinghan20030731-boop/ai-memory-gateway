@@ -41,11 +41,7 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
 # 备用API列表（按顺序尝试，第一个失败切第二个）
 # 第一个优先用环境变量里的官方API，后面是备用站子
 API_FALLBACK_LIST = [
-    {
-        "key": "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",
-        "base_url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "google/gemini-3.1-pro-preview",
-    },
+   
     {
         "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",
         "base_url": "https://api.dzzi.ai/v1/chat/completions",

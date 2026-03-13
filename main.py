@@ -45,7 +45,7 @@ API_FALLBACK_LIST = [
     {
         "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",
         "base_url": "https://api.dzzi.ai/v1/chat/completions",
-        "model": "[按次]gemini-3.1-pro-preview-128",
+        "model": "[按次]gemini-3.1-pro-preview",
     },
     {
         "key": "sk-acy52tZ89kzNlSxHfyxDXtFuXgHQBIE5vKUhbD251RnVOJOA",
@@ -1218,7 +1218,7 @@ async def process_buffered_messages():
         print(f"⚠️  DDL检测出错（不影响聊天）: {e}")
 
     # 检测网页生成请求
-    webpage_keywords = ["做个网页", "做一个网页", "给我做网页", "生成网页", "写个网页", "写一个网页", "做个页面", "做一个页面"]
+    webpage_keywords = ["做个网页", "做个小网页", "做一个小网页", "给我做小网页", "做一个网页", "给我做网页", "生成网页", "写个网页", "写一个网页", "做个页面", "做一个页面"]
     if any(kw in combined_text for kw in webpage_keywords):
         try:
             await generate_and_send_webpage(combined_text)

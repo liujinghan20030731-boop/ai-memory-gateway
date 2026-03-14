@@ -27,7 +27,10 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from database import (init_tables, close_pool, save_message, search_memories,
                       save_memory, get_all_memories_count, get_recent_memories,
                       get_all_memories, get_pool, get_all_memories_detail,
-                      update_memory, delete_memory, delete_memories_batch)
+                      update_memory, delete_memory, delete_memories_batch,
+                      append_bot_messages, load_bot_conversation_history,
+                      save_ddl_task, load_ddl_tasks, mark_ddl_reminded,
+                      set_bot_state, get_bot_state)
 from memory_extractor import extract_memories, score_memories
 
 # ============================================================
@@ -141,17 +144,47 @@ else:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if MEMORY_ENABLED:
+    # 数据库初始化（无论 MEMORY_ENABLED 都要建 bot 持久化表）
+    if DATABASE_URL := os.getenv("DATABASE_URL", ""):
         try:
             await init_tables()
-            count = await get_all_memories_count()
-            print(f"✅ 记忆系统已启动，当前记忆数量：{count}")
+            if MEMORY_ENABLED:
+                count = await get_all_memories_count()
+                print(f"✅ 记忆系统已启动，当前记忆数量：{count}")
+            else:
+                print("ℹ️  记忆系统已关闭，但 bot 持久化表已就绪")
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
     else:
-        print("ℹ️  记忆系统已关闭")
+        if MEMORY_ENABLED:
+            print("⚠️  MEMORY_ENABLED=true 但未设置 DATABASE_URL")
+        else:
+            print("ℹ️  无数据库，bot 状态不持久化")
 
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        # 从数据库恢复 bot 状态
+        if os.getenv("DATABASE_URL", ""):
+            try:
+                # 恢复对话历史
+                history = await load_bot_conversation_history(500)
+                if history:
+                    tg_state.conversation_history = history
+                    print(f"✅ 对话历史已恢复：{len(history)} 条")
+
+                # 恢复 DDL 任务
+                ddl_tasks = await load_ddl_tasks()
+                if ddl_tasks:
+                    ddl_list.extend(ddl_tasks)
+                    print(f"✅ DDL 任务已恢复：{len(ddl_tasks)} 条")
+
+                # 恢复 last_morning_date（防重复早安）
+                morning_date_str = await get_bot_state("last_morning_date")
+                if morning_date_str:
+                    from datetime import date
+                    tg_state.last_morning_date = date.fromisoformat(morning_date_str)
+                    print(f"✅ last_morning_date 已恢复：{morning_date_str}")
+            except Exception as e:
+                print(f"⚠️  bot 状态恢复失败（不影响运行）: {e}")
         print("✅ Telegram Bot 已启动")
         asyncio.create_task(telegram_polling())
         asyncio.create_task(morning_greeting_scheduler())
@@ -214,6 +247,16 @@ async def send_telegram_message(text: str):
         except Exception as e:
             print(f"⚠️  Telegram 发送失败: {e}")
 
+
+async def persist_new_messages(new_messages: list):
+    """后台把新消息存入数据库（fire-and-forget）"""
+    if not os.getenv("DATABASE_URL", "") or not new_messages:
+        return
+    try:
+        await append_bot_messages(new_messages)
+    except Exception as e:
+        print(f"⚠️  对话历史持久化失败: {e}")
+
 def is_active_hours() -> bool:
     now = get_local_now()
     weekday = now.weekday()
@@ -254,6 +297,12 @@ async def morning_greeting_scheduler():
 
             if hour == target_hour and minute == target_minute and tg_state.last_morning_date != today:
                 tg_state.last_morning_date = today
+                # 持久化早安日期（防重启后重复发）
+                if os.getenv("DATABASE_URL", ""):
+                    try:
+                        await set_bot_state("last_morning_date", today.isoformat())
+                    except Exception as e:
+                        print(f"⚠️  早安日期持久化失败: {e}")
                 # 如果在睡眠模式，自动切回正常模式
                 if tg_state.mode == Mode.SLEEP:
                     enter_mode(Mode.NORMAL)
@@ -346,6 +395,11 @@ async def ddl_reminder_scheduler():
                     msg = await generate_message("ddl_reminder", extra=ddl["title"])
                     await send_telegram_message(msg)
                     ddl["reminded"] = True
+                    if ddl.get("db_id") and os.getenv("DATABASE_URL", ""):
+                        try:
+                            await mark_ddl_reminded(ddl["db_id"])
+                        except Exception as e:
+                            print(f"⚠️  DDL 提醒状态更新失败: {e}")
                     print(f"📅 DDL提醒已发：{ddl['title']}")
         except Exception as e:
             print(f"⚠️  DDL调度器错误: {e}")
@@ -359,7 +413,15 @@ async def detect_and_save_ddl(text: str):
     result = await parse_ddl_from_message(text)
     if not result:
         return
-    ddl_list.append({"title": result["title"], "deadline": result["deadline"], "reminded": False})
+    ddl_entry = {"title": result["title"], "deadline": result["deadline"], "reminded": False, "db_id": None}
+    # 写入数据库（有 DB 时）
+    if os.getenv("DATABASE_URL", ""):
+        try:
+            db_id = await save_ddl_task(result["title"], result["deadline"])
+            ddl_entry["db_id"] = db_id
+        except Exception as e:
+            print(f"⚠️  DDL 持久化失败: {e}")
+    ddl_list.append(ddl_entry)
     deadline_str = result["deadline"].strftime("%m月%d日 %H:%M")
     confirm = f"好，{result['title']} 截止{deadline_str}，我记下了，提前一天提醒你。"
     await send_telegram_message(confirm)
@@ -1319,14 +1381,22 @@ async def generate_telegram_reply(user_text: str, images: list = None, buffer_co
 
         # 保存到对话历史（每条消息分开存，保留上下文精度）
         if raw_parts and len(raw_parts) > 1:
-            for part in raw_parts:
-                tg_state.conversation_history.append({"role": "user", "content": part})
+            new_msgs = [{"role": "user", "content": p} for p in raw_parts]
+            new_msgs.append({"role": "assistant", "content": reply})
+            for msg in new_msgs:
+                tg_state.conversation_history.append(msg)
             tg_state.conversation_history.append({"role": "assistant", "content": reply})
         else:
+            new_msgs = [
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": reply},
+            ]
             tg_state.conversation_history.append({"role": "user", "content": user_text})
             tg_state.conversation_history.append({"role": "assistant", "content": reply})
         if len(tg_state.conversation_history) > 60:
             tg_state.conversation_history = tg_state.conversation_history[-500:]
+        # 持久化新消息（后台，不阻塞回复）
+        asyncio.create_task(persist_new_messages(new_msgs))
 
         session_id = str(uuid.uuid4())[:8]
         if MEMORY_ENABLED:

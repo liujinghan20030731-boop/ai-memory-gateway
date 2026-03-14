@@ -85,7 +85,37 @@ async def init_tables():
             CREATE INDEX IF NOT EXISTS idx_conversations_session 
             ON conversations (session_id, created_at);
         """)
-    
+
+        # Bot 持久化：对话历史
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_conversation_history (
+                id         SERIAL PRIMARY KEY,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
+        # Bot 持久化：DDL 任务
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_ddl_list (
+                id         SERIAL PRIMARY KEY,
+                title      TEXT NOT NULL,
+                deadline   TIMESTAMPTZ NOT NULL,
+                reminded   BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
+        # Bot 持久化：杂项状态（last_morning_date 等）
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
     print("✅ 数据库表结构已就绪")
 
 
@@ -325,3 +355,91 @@ async def delete_memories_batch(memory_ids: list):
         await conn.execute(
             "DELETE FROM memories WHERE id = ANY($1::int[])", memory_ids
         )
+
+
+# ============================================================
+# Bot 持久化：对话历史
+# ============================================================
+
+async def append_bot_messages(messages: list):
+    """追加新消息到 bot_conversation_history，并保留最近500条"""
+    if not messages:
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO bot_conversation_history (role, content) VALUES ($1, $2)",
+            [(m["role"], m["content"]) for m in messages]
+        )
+        # 只保留最新500条
+        await conn.execute("""
+            DELETE FROM bot_conversation_history
+            WHERE id NOT IN (
+                SELECT id FROM bot_conversation_history ORDER BY id DESC LIMIT 500
+            )
+        """)
+
+
+async def load_bot_conversation_history(limit: int = 500) -> list:
+    """启动时从数据库恢复对话历史"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT role, content FROM bot_conversation_history ORDER BY id DESC LIMIT $1",
+            limit
+        )
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
+# ============================================================
+# Bot 持久化：DDL 任务
+# ============================================================
+
+async def save_ddl_task(title: str, deadline) -> int:
+    """保存一条 DDL 任务，返回数据库 id"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO bot_ddl_list (title, deadline) VALUES ($1, $2) RETURNING id",
+            title, deadline
+        )
+        return row["id"]
+
+
+async def load_ddl_tasks() -> list:
+    """启动时加载未过期的 DDL 任务"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, title, deadline, reminded FROM bot_ddl_list WHERE deadline > NOW() ORDER BY deadline ASC"
+        )
+        return [{"db_id": r["id"], "title": r["title"], "deadline": r["deadline"], "reminded": r["reminded"]} for r in rows]
+
+
+async def mark_ddl_reminded(db_id: int):
+    """标记某条 DDL 已提醒"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE bot_ddl_list SET reminded = TRUE WHERE id = $1", db_id)
+
+
+# ============================================================
+# Bot 持久化：杂项状态
+# ============================================================
+
+async def set_bot_state(key: str, value: str):
+    """存储任意状态值（upsert）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bot_state (key, value, updated_at) VALUES ($1, $2, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()
+        """, key, value)
+
+
+async def get_bot_state(key: str) -> str:
+    """读取状态值，不存在返回 None"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM bot_state WHERE key = $1", key)
+        return row["value"] if row else None

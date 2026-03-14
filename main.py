@@ -643,9 +643,6 @@ async def generate_and_send_diary():
             if isinstance(msg["content"], str):
                 history_text += f"{role}：{msg['content']}\n"
 
-    if not history_text.strip():
-        return
-
     if MEMORY_ENABLED:
         try:
             system_with_mem = await build_system_prompt_with_memories("今天发生的事 聊天内容 情绪")
@@ -654,7 +651,9 @@ async def generate_and_send_diary():
     else:
         system_with_mem = SYSTEM_PROMPT
 
-    prompt = f"""今天是{date_str}。下面是我和官塘今天的聊天记录：
+    # 有聊天记录：正常写日记；没有：写一篇思念日记
+    if history_text.strip():
+        prompt = f"""今天是{date_str}。下面是我和官塘今天的聊天记录：
 
 {history_text}
 
@@ -664,35 +663,36 @@ async def generate_and_send_diary():
 - 写出我对她的感受和心疼
 - 字数不限，要真情实感，像写给她的情书
 - 文笔浪漫细腻，但也可以有流水账的真实感"""
+    else:
+        prompt = f"""今天是{date_str}。今天我和官塘没有聊天记录。
+请以我（男友）的第一人称，写一篇短日记。要求：
+- 今天没聊天，但我脑子里还是有她
+- 写写我在想她什么，或者今天发生了什么让我想到她
+- 真情实感，不要刻意，像一个人对着日记本发呆
+- 200字左右就好"""
 
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model": DEFAULT_MODEL,
-        "messages": [
-            {"role": "system", "content": system_with_mem},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 5000,
-    }
-
-    async with httpx.AsyncClient(timeout=90) as client:
-        try:
-            resp = await client.post(API_BASE_URL, headers=headers, json=body)
-            diary = resp.json()["choices"][0]["message"]["content"].strip()
-            # 写入Notion，不再发Telegram
-            notion_ok = await write_diary_to_notion(date_str, diary)
-            if not notion_ok:
-                # Notion失败才发Telegram兜底
-                parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
-                for i, part in enumerate(parts):
-                    await send_telegram_message(part)
-                    if i < len(parts) - 1:
-                        await asyncio.sleep(1.5)
-                print(f"📔 Notion写入失败，日记已发送到Telegram，共{len(parts)}段")
-            else:
-                print(f"📔 日记已写入Notion")
-        except Exception as e:
-            print(f"⚠️  日记生成失败: {e}")
+    try:
+        diary = await call_llm_with_fallback(
+            [
+                {"role": "system", "content": system_with_mem},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=5000
+        )
+        # 写入Notion，不再发Telegram
+        notion_ok = await write_diary_to_notion(date_str, diary)
+        if not notion_ok:
+            # Notion失败才发Telegram兜底
+            parts = [p.strip() for p in diary.split("\n\n") if p.strip()]
+            for i, part in enumerate(parts):
+                await send_telegram_message(part)
+                if i < len(parts) - 1:
+                    await asyncio.sleep(1.5)
+            print(f"📔 Notion写入失败，日记已发送到Telegram，共{len(parts)}段")
+        else:
+            print(f"📔 日记已写入Notion")
+    except Exception as e:
+        print(f"⚠️  日记生成失败: {e}")
 
 
 

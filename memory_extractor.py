@@ -12,11 +12,44 @@ import json
 import httpx
 from typing import List, Dict
 
-API_KEY = os.getenv("API_KEY", "")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+# 与 main.py 保持一致的 fallback 列表
+API_FALLBACK_LIST = [
+    {
+        "key": "sk-SAxoB5AMEOCYtAJUR7HQT3EkNGQpDew2Aao4CINgLh1WiXZM",
+        "base_url": "https://api.dzzi.ai/v1/chat/completions",
+        "model": "[按次]gemini-3.1-pro-preview",
+    },
+    {
+        "key": "sk-acy52tZ89kzNlSxHfyxDXtFuXgHQBIE5vKUhbD251RnVOJOA",
+        "base_url": "https://api.gemai.cc/v1/chat/completions",
+        "model": "[满血B]gemini-3-pro-preview",
+    },
+]
 
-# 用来提取记忆的模型（便宜的就行）
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4")
+
+async def call_llm_with_fallback(messages: list, max_tokens: int = 1000) -> str:
+    """带自动切换的LLM调用，与 main.py 逻辑一致"""
+    last_error = None
+    for i, api in enumerate(API_FALLBACK_LIST):
+        try:
+            headers = {"Authorization": f"Bearer {api['key']}", "Content-Type": "application/json"}
+            body = {"model": api["model"], "messages": messages, "max_tokens": max_tokens}
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(api["base_url"], headers=headers, json=body)
+                data = resp.json()
+                if "choices" not in data:
+                    err_msg = data.get("error", {})
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message", str(data))
+                    raise Exception(f"API返回错误: {err_msg}")
+                result = data["choices"][0]["message"]["content"].strip()
+                if i > 0:
+                    print(f"✅ 记忆提取切换到备用API #{i+1} 成功")
+                return result
+        except Exception as e:
+            last_error = e
+            print(f"⚠️  记忆提取 API #{i+1} 失败: {e}，尝试下一个...")
+    raise Exception(f"记忆提取所有API均失败，最后错误: {last_error}")
 
 
 
@@ -162,62 +195,34 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
 
     # 调用 LLM 提取记忆
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                API_BASE_URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://midsummer-gateway.local",
-                    "X-Title": "Midsummer Memory Extraction",
-                },
-                json={
-                    "model": MEMORY_MODEL,
-                    "max_tokens": 1000,
-                    "messages": [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": f"请从以下对话中提取新的记忆：\n\n{conversation_text}"},
-                    ],
-                },
-            )
+        text = await call_llm_with_fallback(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"请从以下对话中提取新的记忆：\n\n{conversation_text}"},
+            ],
+            max_tokens=1000,
+        )
 
-            if response.status_code != 200:
-                print(f"⚠️  记忆提取请求失败: {response.status_code}")
-                return []
+        # 解析 JSON
+        memories = robust_json_parse(text)
+        if memories is None:
+            print(f"⚠️  记忆提取结果解析失败，原始内容: {text[:100]}")
+            return []
 
-            data = response.json()
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not isinstance(memories, list):
+            return []
 
-            # 清理可能的 markdown 格式
-            text = text.strip()
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+        # 验证格式
+        valid_memories = []
+        for mem in memories:
+            if isinstance(mem, dict) and "content" in mem:
+                valid_memories.append({
+                    "content": str(mem["content"]),
+                    "importance": int(mem.get("importance", 5)),
+                })
 
-            # 解析 JSON
-            memories = robust_json_parse(text)
-            if memories is None:
-                print(f"⚠️  记忆提取结果解析失败，原始内容: {text[:100]}")
-                return []
-
-            if not isinstance(memories, list):
-                return []
-
-            # 验证格式
-            valid_memories = []
-            for mem in memories:
-                if isinstance(mem, dict) and "content" in mem:
-                    valid_memories.append({
-                        "content": str(mem["content"]),
-                        "importance": int(mem.get("importance", 5)),
-                    })
-
-            print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
-            return valid_memories
+        print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
+        return valid_memories
 
     except json.JSONDecodeError as e:
         print(f"⚠️  记忆提取结果解析失败: {e}")
@@ -255,52 +260,25 @@ async def score_memories(texts: List[str]) -> List[Dict]:
     prompt = SCORING_PROMPT.format(memories_text=memories_text)
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                API_BASE_URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": MEMORY_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                    "max_tokens": 4000,
-                },
-            )
+        text = await call_llm_with_fallback(
+            [{"role": "user", "content": prompt}],
+            max_tokens=4000,
+        )
 
-            if response.status_code != 200:
-                print(f"⚠️  记忆评分请求失败: {response.status_code}")
-                # 失败时返回默认分数
-                return [{"content": t, "importance": 5} for t in texts]
+        memories = robust_json_parse(text)
+        if memories is None or not isinstance(memories, list):
+            return [{"content": t, "importance": 5} for t in texts]
 
-            data = response.json()
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        valid = []
+        for mem in memories:
+            if isinstance(mem, dict) and "content" in mem:
+                valid.append({
+                    "content": str(mem["content"]),
+                    "importance": int(mem.get("importance", 5)),
+                })
 
-            text = text.strip()
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-
-            memories = robust_json_parse(text)
-            if memories is None or not isinstance(memories, list):
-                return [{"content": t, "importance": 5} for t in texts]
-
-            valid = []
-            for mem in memories:
-                if isinstance(mem, dict) and "content" in mem:
-                    valid.append({
-                        "content": str(mem["content"]),
-                        "importance": int(mem.get("importance", 5)),
-                    })
-
-            print(f"📝 为 {len(valid)} 条记忆完成自动评分")
-            return valid
+        print(f"📝 为 {len(valid)} 条记忆完成自动评分")
+        return valid
 
     except Exception as e:
         print(f"⚠️  记忆评分出错: {e}")

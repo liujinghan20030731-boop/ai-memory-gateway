@@ -128,6 +128,7 @@ EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提
 - 关于记忆系统本身的讨论（"某条记忆没有被记录""记忆遗漏""没有被提取"等）
 - 技术调试、bug修复的过程性讨论（除非涉及用户技能或项目里程碑）
 - AI的思考过程、思维链内容
+- 以[系统上报]开头的定时状态消息（位置、天气、电量等自动上报信息）
 
 # 已知信息处理【最重要】
 <已知信息>
@@ -164,10 +165,6 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     返回：
         记忆列表，格式 [{"content": "...", "importance": N}, ...]
     """
-    if not API_KEY:
-        print("⚠️  API_KEY 未设置，跳过记忆提取")
-        return []
-
     if not messages:
         return []
 
@@ -254,6 +251,12 @@ SCORING_PROMPT = """你是记忆重要性评分专家。请对以下记忆条目
 async def score_memories(texts: List[str]) -> List[Dict]:
     """对纯文本记忆条目批量评分"""
     if not texts:
+        return []
+
+    # 过滤掉系统上报消息（快捷方式定时发送的位置/天气/电量）
+    texts = [t for t in texts if not t.startswith("[系统上报]")]
+    if not texts:
+        print("📝 全部为系统上报消息，跳过评分")
         return []
 
     memories_text = "\n".join(f"- {t}" for t in texts)
